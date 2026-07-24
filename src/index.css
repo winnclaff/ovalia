@@ -2828,3 +2828,136 @@ body {
   color: #666;
 }
 .btn-outline:hover { border-color: #1B7A4A; color: #1B7A4A; }
+
+/* ─── Dashboard enrichi ─────────────────────────────────────────────────────── */
+
+.dash-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.dash-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.dash-alert:hover { filter: brightness(0.96); }
+
+.dash-alert-warning {
+  background: #fff8e8;
+  color: #b07800;
+  border: 1.5px solid #ffe0a0;
+}
+.dash-alert-info {
+  background: #eef4ff;
+  color: #2563a8;
+  border: 1.5px solid #c0d8f8;
+}
+.dash-alert-icon { font-size: 15px; flex-shrink: 0; }
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+@media (max-width: 700px) {
+  .dash-grid { grid-template-columns: 1fr; }
+}
+
+.dash-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px;
+}
+
+.dash-card-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #aaa;
+  margin: 0 0 4px;
+}
+
+.dash-opponent {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1A1A2E;
+  margin: 0;
+}
+
+.dash-match-date {
+  font-size: 12px;
+  color: #666;
+  margin: 0;
+}
+
+.dash-deadline {
+  font-size: 12px;
+  color: #888;
+  margin: 2px 0 0;
+}
+.dash-deadline-urgent {
+  color: #b07800;
+  font-weight: 700;
+}
+
+.dash-result-label {
+  font-size: 14px;
+  font-weight: 800;
+  margin: 0;
+}
+.result-w { color: #1B7A4A; }
+.result-l { color: #e74c3c; }
+.result-d { color: #888; }
+
+.dash-score {
+  font-size: 26px;
+  font-weight: 800;
+  color: #1A1A2E;
+  margin: 0;
+  line-height: 1.1;
+}
+
+.dash-rank {
+  font-size: 32px;
+  font-weight: 900;
+  color: #1B7A4A;
+  margin: 0;
+  line-height: 1;
+}
+.dash-rank-total {
+  font-size: 16px;
+  font-weight: 600;
+  color: #aaa;
+}
+
+.dash-standing-detail {
+  font-size: 12px;
+  color: #888;
+  margin: 2px 0 0;
+}
+.dash-standing-pts {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1A1A2E;
+  margin: 0;
+}
+
+.dash-empty {
+  font-size: 13px;
+  color: #bbb;
+  margin: 0;
+  font-style: italic;
+}
