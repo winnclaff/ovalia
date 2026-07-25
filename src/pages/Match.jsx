@@ -20,7 +20,7 @@ const POSITION_SLOTS = [
   { number: 12, label: 'Centre',              position: 'CENTER',     group: 'Arrières' },
   { number: 13, label: 'Centre',              position: 'CENTER',     group: 'Arrières' },
   { number: 14, label: 'Ailier droit',        position: 'WING',       group: 'Arrières' },
-  { number: 15, label: 'Arrière',             position: 'FULLBACK',   group: 'Arrières' },
+  { number: 15, label: 'Arrière',             position: 'FULL_BACK',  group: 'Arrières' },
 ]
 
 const BENCH_SLOTS = [
@@ -72,15 +72,41 @@ const normalPos = (pos) => (pos ?? '').toUpperCase().replace(/[-\s]/g, '_')
 
 const posMatch = (player, slot) => {
   if (!slot?.position) return true
-  return normalPos(player.position) === slot.position
+  return normalPos(player.primary_position) === slot.position
 }
+
+// ✅ la colonne match_lineups.position est un enum en minuscules (ex: 'full_back'),
+// alors que POSITION_SLOTS/BENCH_SLOTS utilisent des clés normalisées majuscules
+// en interne (mêmes clés que primary_position une fois normalisé).
+const toDbPosition = (pos) => (pos ?? '').toLowerCase()
 
 const fmt = (n) =>
   (n ?? 0).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })
 
+// ─── Verrouillage samedi 12h Paris (même règle que le cron ovalia-lock-lineups) ─
+
+const parisDateParts = (date) => {
+  const fmt2 = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  })
+  const parts = Object.fromEntries(fmt2.formatToParts(date).map((p) => [p.type, p.value]))
+  return { dateStr: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) }
+}
+
+const isLineupLocked = (match) => {
+  if (!match?.scheduled_at) return false
+  if (match.status && match.status !== 'scheduled') return true
+  const nowParis   = parisDateParts(new Date())
+  const matchParis = parisDateParts(new Date(match.scheduled_at))
+  if (nowParis.dateStr > matchParis.dateStr) return true
+  if (nowParis.dateStr < matchParis.dateStr) return false
+  return nowParis.hour >= 12
+}
+
 // ─── Lineup sub-components ────────────────────────────────────────────────────
 
-function LineupRow({ slot, player, onOpen, onRemove }) {
+function LineupRow({ slot, player, onOpen, onRemove, readOnly }) {
   return (
     <div className={`lineup-row${player ? ' lineup-row-filled' : ''}`}>
       <span className="lineup-number">{slot.number}</span>
@@ -89,8 +115,10 @@ function LineupRow({ slot, player, onOpen, onRemove }) {
         <>
           <span className="lineup-player-name">{playerName(player)}</span>
           <span className="lineup-overall">{getOverall(player)}</span>
-          <button className="lineup-btn-remove" onClick={onRemove}>✕</button>
+          {!readOnly && <button className="lineup-btn-remove" onClick={onRemove}>✕</button>}
         </>
+      ) : readOnly ? (
+        <span className="lineup-empty-label">—</span>
       ) : (
         <button className="lineup-btn-assign" onClick={onOpen}>+ Choisir</button>
       )}
@@ -134,7 +162,7 @@ function PlayerPickerModal({ slot, players, currentPlayer, onSelect, onClose }) 
               >
                 <span className={`picker-fit-dot ${fits ? 'fit' : 'nofit'}`} />
                 <span className="picker-name">{playerName(p)}</span>
-                <span className="picker-pos">{p.position ?? '—'}</span>
+                <span className="picker-pos">{p.primary_position ?? '—'}</span>
                 <span className="picker-overall" style={{ color: overall >= 70 ? '#1B7A4A' : overall >= 55 ? '#F5820D' : '#e74c3c' }}>
                   {overall}
                 </span>
@@ -147,9 +175,26 @@ function PlayerPickerModal({ slot, players, currentPlayer, onSelect, onClose }) 
   )
 }
 
-function SubsTab({ subs, setSubs, lineup, positionSlots, benchSlots }) {
+function SubsTab({ subs, setSubs, lineup, positionSlots, benchSlots, readOnly }) {
   const filledStarters = positionSlots.filter((s) => lineup[s.number] !== null)
   const filledBench    = benchSlots.filter((s) => lineup[s.number] !== null)
+
+  if (readOnly) {
+    return (
+      <div className="card" style={{ padding: 20 }}>
+        {subs.length === 0 ? (
+          <p style={{ color: '#aaa' }}>Aucun remplacement planifié.</p>
+        ) : subs.map((sub, i) => (
+          <div key={i} className="sub-row">
+            <span className="sub-index">{i + 1}</span>
+            <span>{playerName(lineup[sub.from])} → {playerName(lineup[sub.to])}</span>
+            <span style={{ color: '#888' }}>{sub.minute === 'HT' ? 'Mi-temps' : `${sub.minute}'`}</span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="card" style={{ padding: 20 }}>
       <p className="training-desc" style={{ marginBottom: 16 }}>
@@ -194,6 +239,59 @@ function SubsTab({ subs, setSubs, lineup, positionSlots, benchSlots }) {
 }
 
 // ─── Live match view ──────────────────────────────────────────────────────────
+
+function LineupSummary({ matchId, clubId }) {
+  const [lineup, setLineup] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    supabase
+      .from('match_lineups')
+      .select('shirt_number, players(*)')
+      .eq('match_id', matchId)
+      .eq('club_id', clubId)
+      .then(({ data }) => {
+        if (cancelled) return
+        const map = {}
+        ;[...POSITION_SLOTS, ...BENCH_SLOTS].forEach((s) => { map[s.number] = null })
+        ;(data ?? []).forEach((row) => { if (row.players) map[row.shirt_number] = row.players })
+        setLineup(map)
+      })
+    return () => { cancelled = true }
+  }, [matchId, clubId])
+
+  if (!lineup) return null
+  const hasAny = Object.values(lineup).some(Boolean)
+  if (!hasAny) return null
+
+  return (
+    <div className="card lineup-summary-card">
+      <h3 className="lineup-section-title">Votre composition</h3>
+      <div className="lineup-layout">
+        <div className="lineup-section">
+          <div className="lineup-group">
+            <div className="lineup-group-label">Avants (1–8)</div>
+            {POSITION_SLOTS.filter((s) => s.group === 'Avants').map((slot) => (
+              <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]} readOnly />
+            ))}
+          </div>
+          <div className="lineup-group">
+            <div className="lineup-group-label">Arrières (9–15)</div>
+            {POSITION_SLOTS.filter((s) => s.group === 'Arrières').map((slot) => (
+              <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]} readOnly />
+            ))}
+          </div>
+        </div>
+        <div className="lineup-section">
+          <div className="lineup-group-label">Banc (16–23)</div>
+          {BENCH_SLOTS.map((slot) => (
+            <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]} readOnly />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function LiveMatchView({ match, club, onBack }) {
   const [events, setEvents]         = useState([])
@@ -274,6 +372,8 @@ function LiveMatchView({ match, club, onBack }) {
           )}
         </div>
       </div>
+
+      <LineupSummary matchId={match.id} clubId={club?.id} />
 
       {/* Event feed */}
       <div className="live-events-list">
@@ -592,12 +692,13 @@ export default function Match({ session }) {
       setTab('live')
     }
 
-    // Prochain match à venir (pour la compo)
+    // Prochain match à préparer (pour la compo) — inclut aussi 'lineups_locked'
+    // pour permettre la consultation en lecture seule une fois verrouillé.
     const { data: match } = await supabase
       .from('matches')
       .select('*, home_club:clubs!home_club_id(id,name), away_club:clubs!away_club_id(id,name)')
       .or(`home_club_id.eq.${club.id},away_club_id.eq.${club.id}`)
-      .eq('status', 'scheduled')
+      .in('status', ['scheduled', 'lineups_locked'])
       .is('home_score', null)
       .order('scheduled_at', { ascending: true })
       .limit(1)
@@ -658,13 +759,23 @@ export default function Match({ session }) {
   }
 
   const handleSave = async () => {
+    if (isLineupLocked(nextMatch)) {
+      setErrors(['Les compositions sont verrouillées pour ce match (samedi 12h passé).'])
+      return
+    }
     const errs = validate()
     if (errs.length) { setErrors(errs); return }
     if (!nextMatch) return
     setSaving(true); setSavedMsg(''); setErrors([])
 
-    await supabase.from('match_lineups').delete()
+    const { error: delErr } = await supabase.from('match_lineups').delete()
       .eq('match_id', nextMatch.id).eq('club_id', clubId)
+
+    if (delErr) {
+      setSaving(false)
+      setErrors([`Erreur lors de la sauvegarde : ${delErr.message}`])
+      return
+    }
 
     const rows = []
     ;[...POSITION_SLOTS, ...BENCH_SLOTS].forEach((slot) => {
@@ -674,12 +785,21 @@ export default function Match({ session }) {
       rows.push({
         match_id: nextMatch.id, club_id: clubId, player_id: player.id,
         shirt_number: slot.number, is_starter: slot.number <= 15,
-        position: slot.position ?? player.position,
+        // ✅ match_lineups.position est un enum minuscule ; slot.position/primary_position sont normalisés en majuscules
+        position: toDbPosition(slot.position ?? player.primary_position),
         planned_sub_minute: sub ? (sub.minute === 'HT' ? 40 : sub.minute) : null,
         replaces_player_id: sub ? (lineup[sub.to]?.id ?? null) : null,
       })
     })
-    if (rows.length) await supabase.from('match_lineups').insert(rows)
+
+    if (rows.length) {
+      const { error: insErr } = await supabase.from('match_lineups').insert(rows)
+      if (insErr) {
+        setSaving(false)
+        setErrors([`Erreur lors de la sauvegarde : ${insErr.message}`])
+        return
+      }
+    }
     setSaving(false); setSavedMsg('Composition sauvegardée ✓')
   }
 
@@ -687,8 +807,7 @@ export default function Match({ session }) {
 
   const starterCount = POSITION_SLOTS.filter((s) => lineup[s.number] !== null).length
   const benchCount   = BENCH_SLOTS.filter((s) => lineup[s.number] !== null).length
-
-  const showComposition = tab === 'composition' || tab === 'subs'
+  const locked        = isLineupLocked(nextMatch)
 
   return (
     <Layout onLogout={handleLogout}>
@@ -708,14 +827,14 @@ export default function Match({ session }) {
                   {liveMatch.status === 'completed' ? 'Résumé' : '● En direct'}
                 </button>
               )}
-              {nextMatch && nextMatch.status === 'scheduled' && (
+              {nextMatch && (
                 <>
                   <button className={`tab-btn${tab === 'composition' ? ' active' : ''}`} onClick={() => setTab('composition')}>
-                    Composition
+                    Composition {locked && '🔒'}
                     <span className="tab-badge">{starterCount}/15</span>
                   </button>
                   <button className={`tab-btn${tab === 'subs' ? ' active' : ''}`} onClick={() => setTab('subs')}>
-                    Remplacements
+                    Remplacements {locked && '🔒'}
                     {subs.length > 0 && <span className="tab-badge">{subs.length}</span>}
                   </button>
                 </>
@@ -755,6 +874,12 @@ export default function Match({ session }) {
                   </div>
                 </div>
 
+                {locked && (
+                  <div className="lineup-locked-banner">
+                    🔒 Compositions verrouillées (samedi 12h) — lecture seule.
+                  </div>
+                )}
+
                 {tab === 'composition' && (
                   <div className="lineup-layout">
                     <div className="lineup-section">
@@ -762,14 +887,14 @@ export default function Match({ session }) {
                       <div className="lineup-group">
                         <div className="lineup-group-label">Avants (1–8)</div>
                         {POSITION_SLOTS.filter((s) => s.group === 'Avants').map((slot) => (
-                          <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]}
+                          <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]} readOnly={locked}
                             onOpen={() => setPickerSlot(slot.number)} onRemove={() => removePlayer(slot.number)} />
                         ))}
                       </div>
                       <div className="lineup-group">
                         <div className="lineup-group-label">Arrières (9–15)</div>
                         {POSITION_SLOTS.filter((s) => s.group === 'Arrières').map((slot) => (
-                          <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]}
+                          <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]} readOnly={locked}
                             onOpen={() => setPickerSlot(slot.number)} onRemove={() => removePlayer(slot.number)} />
                         ))}
                       </div>
@@ -778,7 +903,7 @@ export default function Match({ session }) {
                       <h3 className="lineup-section-title">Banc (16–23)</h3>
                       <p className="lineup-bench-note">Min. 2 piliers + 1 talonneur obligatoires</p>
                       {BENCH_SLOTS.map((slot) => (
-                        <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]}
+                        <LineupRow key={slot.number} slot={slot} player={lineup[slot.number]} readOnly={locked}
                           onOpen={() => setPickerSlot(slot.number)} onRemove={() => removePlayer(slot.number)} />
                       ))}
                     </div>
@@ -786,7 +911,7 @@ export default function Match({ session }) {
                 )}
 
                 {tab === 'subs' && (
-                  <SubsTab subs={subs} setSubs={setSubs} lineup={lineup}
+                  <SubsTab subs={subs} setSubs={setSubs} lineup={lineup} readOnly={locked}
                     positionSlots={POSITION_SLOTS} benchSlots={BENCH_SLOTS} />
                 )}
 
@@ -795,12 +920,14 @@ export default function Match({ session }) {
                     {errors.map((e, i) => <p key={i} className="error-text">⚠ {e}</p>)}
                   </div>
                 )}
-                <div className="tactic-actions">
-                  <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                    {saving ? 'Sauvegarde…' : 'Valider la composition'}
-                  </button>
-                  {savedMsg && <span className="save-success">{savedMsg}</span>}
-                </div>
+                {!locked && (
+                  <div className="tactic-actions">
+                    <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+                      {saving ? 'Sauvegarde…' : 'Valider la composition'}
+                    </button>
+                    {savedMsg && <span className="save-success">{savedMsg}</span>}
+                  </div>
+                )}
               </>
             )}
 
@@ -819,7 +946,7 @@ export default function Match({ session }) {
         )}
 
         {/* Picker modal */}
-        {pickerSlot !== null && (
+        {pickerSlot !== null && !locked && (
           <PlayerPickerModal
             slot={[...POSITION_SLOTS, ...BENCH_SLOTS].find((s) => s.number === pickerSlot)}
             players={availablePlayers(pickerSlot)}

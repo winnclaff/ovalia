@@ -2606,6 +2606,23 @@ body {
   border: 1px solid #f5c6c6;
 }
 
+.lineup-empty-label {
+  color: #ccc;
+  font-size: 13px;
+  margin-left: auto;
+}
+
+.lineup-locked-banner {
+  margin-bottom: 16px;
+  padding: 10px 16px;
+  background: #fdf1e4;
+  color: #a1650e;
+  border: 1px solid #f5d9b0;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 /* Player picker modal */
 .picker-modal {
   max-width: 440px;

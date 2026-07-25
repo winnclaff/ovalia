@@ -271,16 +271,20 @@ serve(async (req) => {
         const netFlow    = sponsors + merchandising - totalSalary - totalCoachSalary - maintenance - fixedCosts
         const newBalance = (club.balance ?? 0) + netFlow
 
+        // ✅ types alignés sur l'enum réel transaction_type (voir fix-transaction-types.sql) :
+        // 'sponsor' (pas 'sponsorship'), 'stadium_upkeep' (pas 'maintenance')
         const txRows = [
-          { club_id: club.id, type: 'salary',       amount: totalSalary,      description: 'Masse salariale mensuelle' },
-          { club_id: club.id, type: 'staff_salary',  amount: totalCoachSalary, description: 'Salaires du staff technique' },
-          { club_id: club.id, type: 'sponsorship',   amount: sponsors,         description: 'Revenus sponsoring mensuel' },
-          { club_id: club.id, type: 'merchandise',   amount: merchandising,    description: 'Merchandising mensuel' },
-          { club_id: club.id, type: 'maintenance',   amount: maintenance,      description: 'Entretien des infrastructures' },
-          { club_id: club.id, type: 'fixed_costs',   amount: fixedCosts,       description: 'Frais fixes mensuels' },
+          { club_id: club.id, type: 'salary',         amount: totalSalary,      description: 'Masse salariale mensuelle' },
+          { club_id: club.id, type: 'staff_salary',    amount: totalCoachSalary, description: 'Salaires du staff technique' },
+          { club_id: club.id, type: 'sponsor',         amount: sponsors,         description: 'Revenus sponsoring mensuel' },
+          { club_id: club.id, type: 'merchandise',     amount: merchandising,    description: 'Merchandising mensuel' },
+          { club_id: club.id, type: 'stadium_upkeep',  amount: maintenance,      description: 'Entretien des infrastructures' },
+          { club_id: club.id, type: 'fixed_costs',     amount: fixedCosts,       description: 'Frais fixes mensuels' },
         ].filter((t) => t.amount > 0)
 
-        await supabase.from('transactions').insert(txRows)
+        const { error: txErr } = await supabase.from('transactions').insert(txRows)
+        if (txErr) log.push(`Finances: erreur insert transactions club ${club.id} — ${txErr.message}`)
+
         await supabase.from('clubs').update({ balance: newBalance }).eq('id', club.id)
       }
       log.push('Finances: transactions mensuelles générées')

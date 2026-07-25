@@ -1,7 +1,18 @@
 -- =============================================================================
 -- Ovalia — Jobs pg_cron
--- Prérequis : activer pg_cron dans Supabase (voir instructions ci-dessous)
--- Remplacer fpeggjlxaybexsqnainn et eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwZWdnamx4YXliZXhzcW5haW5uIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MzkwMjcyMCwiZXhwIjoyMDk5NDc4NzIwfQ.uZxJ4z0HTpdgr_3Ed32CisL194E0g9MxiOYGoZK7rpA avant d'exécuter
+-- Prérequis 1 : activer pg_cron / pg_net (voir instructions ci-dessous)
+-- Prérequis 2 : stocker la clé service_role dans Supabase Vault AVANT d'exécuter
+--   ce fichier (ne jamais committer cette clé en clair) :
+--
+--   select vault.create_secret(
+--     '<TA_CLE_SERVICE_ROLE>',
+--     'service_role_key',
+--     'Clé utilisée par les cron jobs pour appeler les Edge Functions'
+--   );
+--
+-- Exécute ça une seule fois dans le SQL Editor, avec ta vraie clé (Settings →
+-- API → service_role secret). Les jobs ci-dessous la relisent depuis
+-- vault.decrypted_secrets à chaque exécution — elle n'apparaît jamais ici.
 -- =============================================================================
 
 -- ─── Activer l'extension pg_cron ──────────────────────────────────────────────
@@ -24,7 +35,7 @@ SELECT cron.schedule(
     SELECT net.http_post(
       url     := 'https://fpeggjlxaybexsqnainn.supabase.co/functions/v1/nightly-tick',
       headers := jsonb_build_object(
-        'Authorization', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwZWdnamx4YXliZXhzcW5haW5uIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MzkwMjcyMCwiZXhwIjoyMDk5NDc4NzIwfQ.uZxJ4z0HTpdgr_3Ed32CisL194E0g9MxiOYGoZK7rpA',
+        'Authorization', 'Bearer ' || (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'service_role_key'),
         'Content-Type',  'application/json'
       ),
       body    := '{}'::jsonb
@@ -116,7 +127,9 @@ SELECT cron.schedule(
   '5 19 * * 6',   -- 21h05 UTC+2 = 19h05 UTC, samedi (5 min après lock)
   $cron$
     DO $$
-    DECLARE v_match RECORD;
+    DECLARE
+      v_match RECORD;
+      v_key   TEXT := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'service_role_key');
     BEGIN
       FOR v_match IN
         SELECT id FROM matches
@@ -127,7 +140,7 @@ SELECT cron.schedule(
         PERFORM net.http_post(
           url     := 'https://fpeggjlxaybexsqnainn.supabase.co/functions/v1/simulate-match',
           headers := jsonb_build_object(
-            'Authorization', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZwZWdnamx4YXliZXhzcW5haW5uIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MzkwMjcyMCwiZXhwIjoyMDk5NDc4NzIwfQ.uZxJ4z0HTpdgr_3Ed32CisL194E0g9MxiOYGoZK7rpA',
+            'Authorization', 'Bearer ' || v_key,
             'Content-Type',  'application/json'
           ),
           body    := jsonb_build_object('match_id', v_match.id)

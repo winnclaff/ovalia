@@ -520,9 +520,10 @@ serve(async (req) => {
       const ticketRevenue   = Math.round(capacity * attendanceRate * 15 * rateMultiplier)
 
       if (ticketRevenue > 0) {
+        // ✅ 'ticket_revenue' (pas 'ticket') : seule valeur valide de l'enum transaction_type
         await supabase.from('transactions').insert({
           club_id: match.home_club_id,
-          type: 'ticket',
+          type: 'ticket_revenue',
           amount: ticketRevenue,
           description: isFriendly ? 'Billetterie — match amical' : 'Billetterie — match de championnat',
         })
