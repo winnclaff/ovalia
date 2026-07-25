@@ -15,7 +15,7 @@ const POSITION_META = {
   FLY_HALF:   { label: 'Ouvreur',       short: 'OUV', group: 'Arrières', order: 7 },
   CENTER:     { label: 'Centre',        short: 'CTR', group: 'Arrières', order: 8 },
   WING:       { label: 'Ailier',        short: 'AIL', group: 'Arrières', order: 9 },
-  FULLBACK:   { label: 'Arrière',       short: 'ARR', group: 'Arrières', order: 10 },
+  FULL_BACK:  { label: 'Arrière',       short: 'ARR', group: 'Arrières', order: 10 },
 }
 
 const STAT_GROUPS = [
@@ -62,11 +62,20 @@ const getOverall = (p) => {
   return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)
 }
 
-const isInjured = (p) => {
-  if (p.is_injured) return true
-  if (p.injury_until) return new Date(p.injury_until) > new Date()
-  return false
+const computeAge = (dateOfBirth) => {
+  if (!dateOfBirth) return null
+  const today = new Date()
+  const dob = new Date(dateOfBirth)
+  let age = today.getFullYear() - dob.getFullYear()
+  const m = today.getMonth() - dob.getMonth()
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--
+  return age
 }
+
+const isInjured = (p) => (p.injury_days_left ?? 0) > 0
+
+const fmt = (n) =>
+  (n ?? 0).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })
 
 const statColor = (v) => {
   if (v >= 80) return '#1B7A4A'
@@ -89,11 +98,13 @@ const energyColor = (v) => {
 
 // ─── Player detail modal ─────────────────────────────────────────────────────
 
-function PlayerModal({ player, onClose }) {
-  const meta = getPositionMeta(player.position)
+function PlayerModal({ player, listing, onClose, onList, onCancelListing, saving }) {
+  const meta = getPositionMeta(player.primary_position)
   const overall = getOverall(player)
   const injured = isInjured(player)
   const energy = player.energy ?? 0
+  const age = computeAge(player.date_of_birth)
+  const [askingPrice, setAskingPrice] = useState(Math.round((overall * 1000 + 5000) / 500) * 500)
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -106,8 +117,13 @@ function PlayerModal({ player, onClose }) {
               <span className={`position-badge pos-${meta.group === 'Avants' ? 'avant' : 'arriere'}`}>
                 {meta.label}
               </span>
-              {player.age && <span className="modal-detail-text">{player.age} ans</span>}
+              {age != null && <span className="modal-detail-text">{age} ans</span>}
               {player.nationality && <span className="modal-detail-text">{player.nationality}</span>}
+              {(player.height_cm || player.weight_kg) && (
+                <span className="modal-detail-text">
+                  {player.height_cm ? `${player.height_cm} cm` : '—'} · {player.weight_kg ? `${player.weight_kg} kg` : '—'}
+                </span>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -150,6 +166,34 @@ function PlayerModal({ player, onClose }) {
             </div>
           ))}
         </div>
+
+        <div className="sell-section">
+          {listing ? (
+            <>
+              <span className="sell-listed-text">En vente — {fmt(listing.asking_price)}</span>
+              <button className="btn btn-outline" onClick={() => onCancelListing(listing)} disabled={saving}>
+                {saving ? '…' : 'Retirer de la vente'}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="sell-price-row">
+                <input
+                  type="number"
+                  className="recr-input"
+                  value={askingPrice}
+                  min={500}
+                  step={500}
+                  onChange={(e) => setAskingPrice(Math.max(0, Number(e.target.value)))}
+                />
+                <span className="recr-currency">€</span>
+              </div>
+              <button className="btn btn-primary" onClick={() => onList(player, askingPrice)} disabled={saving || askingPrice <= 0}>
+                {saving ? '…' : 'Mettre en vente'}
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -165,11 +209,14 @@ const FILTERS = [
 
 export default function Effectif({ session }) {
   const navigate = useNavigate()
+  const [clubId, setClubId] = useState(null)
   const [players, setPlayers] = useState([])
+  const [listings, setListings] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('all')
   const [selected, setSelected] = useState(null)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => { loadPlayers() }, [])
 
@@ -184,22 +231,46 @@ export default function Effectif({ session }) {
       navigate('/create-club', { replace: true })
       return
     }
+    setClubId(club.id)
 
-    const { data, error: err } = await supabase
-      .from('players')
-      .select('*')
-      .eq('club_id', club.id)
+    const [{ data, error: err }, { data: listingRows }] = await Promise.all([
+      supabase.from('players').select('*').eq('club_id', club.id),
+      supabase.from('transfer_listings').select('id, player_id, asking_price').eq('club_id', club.id).eq('status', 'active'),
+    ])
 
     if (err) setError('Impossible de charger les joueurs.')
     else setPlayers(data ?? [])
+    setListings(Object.fromEntries((listingRows ?? []).map((l) => [l.player_id, l])))
     setLoading(false)
   }
 
   const handleLogout = async () => { await supabase.auth.signOut() }
 
+  const handleList = async (player, askingPrice) => {
+    setSaving(true)
+    const { data, error: err } = await supabase
+      .from('transfer_listings')
+      .insert({ player_id: player.id, club_id: clubId, asking_price: askingPrice })
+      .select('id, player_id, asking_price')
+      .single()
+    if (!err && data) setListings((prev) => ({ ...prev, [player.id]: data }))
+    setSaving(false)
+  }
+
+  const handleCancelListing = async (listing) => {
+    setSaving(true)
+    await supabase.from('transfer_listings').update({ status: 'cancelled' }).eq('id', listing.id)
+    setListings((prev) => {
+      const next = { ...prev }
+      delete next[listing.player_id]
+      return next
+    })
+    setSaving(false)
+  }
+
   const filtered = players
-    .filter((p) => filter === 'all' || getPositionMeta(p.position).group === filter)
-    .sort((a, b) => getPositionMeta(a.position).order - getPositionMeta(b.position).order)
+    .filter((p) => filter === 'all' || getPositionMeta(p.primary_position).group === filter)
+    .sort((a, b) => getPositionMeta(a.primary_position).order - getPositionMeta(b.primary_position).order)
 
   return (
     <Layout onLogout={handleLogout}>
@@ -220,7 +291,7 @@ export default function Effectif({ session }) {
               {label}
               {key !== 'all' && (
                 <span className="filter-count">
-                  {players.filter((p) => getPositionMeta(p.position).group === key).length}
+                  {players.filter((p) => getPositionMeta(p.primary_position).group === key).length}
                 </span>
               )}
             </button>
@@ -238,6 +309,7 @@ export default function Effectif({ session }) {
                   <th>Poste</th>
                   <th>Nom</th>
                   <th>Âge</th>
+                  <th>Gabarit</th>
                   <th>Énergie</th>
                   <th>Statut</th>
                   <th>Note</th>
@@ -246,16 +318,18 @@ export default function Effectif({ session }) {
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: 40, color: '#aaa' }}>
+                    <td colSpan={7} style={{ textAlign: 'center', padding: 40, color: '#aaa' }}>
                       Aucun joueur
                     </td>
                   </tr>
                 ) : (
                   filtered.map((player) => {
-                    const meta = getPositionMeta(player.position)
+                    const meta = getPositionMeta(player.primary_position)
                     const overall = getOverall(player)
                     const injured = isInjured(player)
                     const energy = player.energy ?? 0
+                    const age = computeAge(player.date_of_birth)
+                    const listed = listings[player.id]
                     return (
                       <tr key={player.id} className="player-row" onClick={() => setSelected(player)}>
                         <td>
@@ -263,8 +337,14 @@ export default function Effectif({ session }) {
                             {meta.short}
                           </span>
                         </td>
-                        <td className="player-name-cell">{playerName(player)}</td>
-                        <td className="player-age-cell">{player.age ? `${player.age} ans` : '—'}</td>
+                        <td className="player-name-cell">
+                          {playerName(player)}
+                          {listed && <span className="sell-badge">En vente</span>}
+                        </td>
+                        <td className="player-age-cell">{age != null ? `${age} ans` : '—'}</td>
+                        <td className="player-build-cell">
+                          {player.height_cm ? `${player.height_cm} cm` : '—'} · {player.weight_kg ? `${player.weight_kg} kg` : '—'}
+                        </td>
                         <td>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <div className="energy-bar-container">
@@ -295,7 +375,16 @@ export default function Effectif({ session }) {
           </div>
         )}
 
-        {selected && <PlayerModal player={selected} onClose={() => setSelected(null)} />}
+        {selected && (
+          <PlayerModal
+            player={selected}
+            listing={listings[selected.id] ?? null}
+            onClose={() => setSelected(null)}
+            onList={handleList}
+            onCancelListing={handleCancelListing}
+            saving={saving}
+          />
+        )}
       </div>
     </Layout>
   )

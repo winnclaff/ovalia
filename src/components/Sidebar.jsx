@@ -63,6 +63,17 @@ const IconFinances = () => (
   </svg>
 )
 
+const IconInfrastructure = () => (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+    <path d="M2 15V6.5L6 3.5V15H2z" opacity="0.7"/>
+    <path d="M6.5 15V1.5L10.5 4V15H6.5z"/>
+    <path d="M11 15V6L14 8V15h-3z" opacity="0.7"/>
+    <rect x="3" y="8" width="1.3" height="1.3"/>
+    <rect x="7.3" y="6" width="1.3" height="1.3" fill="#fff" opacity="0.8"/>
+    <rect x="7.3" y="9" width="1.3" height="1.3" fill="#fff" opacity="0.8"/>
+  </svg>
+)
+
 const IconRecrutement = () => (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
     <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5"/>
@@ -98,6 +109,7 @@ const NAV_ITEMS = [
   { to: '/tactique',    label: 'Tactique',     Icon: IconTactique },
   { to: '/finances',    label: 'Finances',     Icon: IconFinances },
   { to: '/recrutement', label: 'Recrutement',  Icon: IconRecrutement },
+  { to: '/infrastructure', label: 'Infrastructures', Icon: IconInfrastructure },
 ]
 
 // ─── Component ────────────────────────────────────────────────────────────────

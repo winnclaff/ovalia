@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import Layout from '../components/Layout'
 
@@ -60,6 +60,7 @@ const emptyFocusStats = () => Object.fromEntries(ALL_STAT_KEYS.map((k) => [k, 0]
 export default function Entrainement({ session }) {
   const navigate = useNavigate()
   const [clubId, setClubId] = useState(null)
+  const [trainingFacilityLevel, setTrainingFacilityLevel] = useState(0)
   const [activeTab, setActiveTab] = useState('avants')
   const [plans, setPlans] = useState({
     avants:    { id: null, focus_stats: emptyFocusStats() },
@@ -75,12 +76,13 @@ export default function Entrainement({ session }) {
   const init = async () => {
     const { data: club } = await supabase
       .from('clubs')
-      .select('id')
+      .select('id, training_facility_level')
       .eq('owner_user_id', session.user.id)
       .single()
 
     if (!club) { navigate('/create-club', { replace: true }); return }
     setClubId(club.id)
+    setTrainingFacilityLevel(club.training_facility_level ?? 0)
 
     const { data } = await supabase
       .from('training_plans')
@@ -324,10 +326,17 @@ export default function Entrainement({ session }) {
             </svg>
           </div>
           <div>
-            <p className="training-locked-title">Nécessite un centre d'entraînement</p>
+            <p className="training-locked-title">
+              {trainingFacilityLevel > 0 ? 'Centre d\'entraînement construit' : 'Nécessite un centre d\'entraînement'}
+            </p>
             <p className="training-locked-desc">
               Assignez des séances individuelles à vos joueurs pour cibler leurs faiblesses.
-              Débloquez cette fonctionnalité en construisant un centre d'entraînement.
+              {trainingFacilityLevel > 0
+                ? ' Votre centre d\'entraînement booste déjà l\'entraînement collectif en attendant.'
+                : ' '}
+              {trainingFacilityLevel === 0 && (
+                <>Construisez-en un dans les <Link to="/infrastructure">Infrastructures</Link>.</>
+              )}
             </p>
             <span className="training-locked-badge">Bientôt disponible</span>
           </div>

@@ -67,6 +67,38 @@ serve(async (req) => {
     const { data: botClubs } = await supabase.from('clubs').select('id').eq('is_bot', true)
     const botClubIds = new Set((botClubs ?? []).map((c) => c.id))
 
+    // ── Pré-charger staff technique + niveaux d'infra pour les bonus/malus ─────
+    // ⚠️ Formules dupliquées (avec ce même commentaire) dans src/lib/finance.js
+    const { data: allCoaches } = await supabase.from('coaches').select('club_id, role, level, monthly_salary')
+    const coachLevelMap: Record<string, Record<string, number>> = {}
+    const coachSalaryMap: Record<string, number> = {}
+    for (const c of allCoaches ?? []) {
+      if (!coachLevelMap[c.club_id]) coachLevelMap[c.club_id] = {}
+      coachLevelMap[c.club_id]![c.role] = c.level
+      coachSalaryMap[c.club_id] = (coachSalaryMap[c.club_id] ?? 0) + (c.monthly_salary ?? 0)
+    }
+
+    const { data: infraClubs } = await supabase
+      .from('clubs')
+      .select('id, training_facility_level, medical_center_level')
+    const infraMap: Record<string, { training_facility_level: number; medical_center_level: number }> = {}
+    for (const c of infraClubs ?? []) {
+      infraMap[c.id] = {
+        training_facility_level: c.training_facility_level ?? 0,
+        medical_center_level: c.medical_center_level ?? 0,
+      }
+    }
+
+    function trainingBonus(clubId: string, targetGroup: string): number {
+      const coaches = coachLevelMap[clubId] ?? {}
+      const infra = infraMap[clubId] ?? { training_facility_level: 0, medical_center_level: 0 }
+      let bonus = (infra.training_facility_level ?? 0) * 0.05
+      if (coaches.head_coach) bonus += coaches.head_coach * 0.10
+      if (targetGroup === 'forwards' && coaches.forwards_coach) bonus += coaches.forwards_coach * 0.15
+      if ((targetGroup === 'backs' || targetGroup === 'halfbacks') && coaches.backs_coach) bonus += coaches.backs_coach * 0.15
+      return bonus
+    }
+
     // ── 1. Blessures ──────────────────────────────────────────────────────────
     {
       // ✅ filtrage par injury_days_left > 0, pas is_injured
@@ -77,7 +109,11 @@ serve(async (req) => {
 
       for (const p of injured ?? []) {
         if (botClubIds.has(p.club_id)) continue  // ✅ bots via club_id
-        const newDays = Math.max(0, (p.injury_days_left ?? 0) - 1)
+        // Kiné + centre médical accélèrent la guérison (cumulatif)
+        const medicLevel = coachLevelMap[p.club_id]?.medic ?? 0
+        const medicalCenterLevel = infraMap[p.club_id]?.medical_center_level ?? 0
+        const recovery = 1 + Math.floor((medicLevel + medicalCenterLevel) / 4)
+        const newDays = Math.max(0, (p.injury_days_left ?? 0) - recovery)
         // ✅ pas de is_injured : dérivé de injury_days_left côté lecture
         await supabase.from('players').update({ injury_days_left: newDays }).eq('id', p.id)
       }
@@ -104,7 +140,7 @@ serve(async (req) => {
       }
 
       const FORWARD_POS = ['PROP','HOOKER','LOCK','FLANKER','NUMBER_8']
-      const BACK_POS    = ['SCRUM_HALF','FLY_HALF','CENTER','WING','FULLBACK']
+      const BACK_POS    = ['SCRUM_HALF','FLY_HALF','CENTER','WING','FULL_BACK']
       const HALF_POS    = ['SCRUM_HALF','FLY_HALF']
       const normalPos   = (pos: string) => (pos ?? '').toUpperCase().replace(/[-\s]/g, '_')
 
@@ -132,12 +168,14 @@ serve(async (req) => {
           // ✅ primary_position au lieu de position
           if (!matchesGroup(player.primary_position, plan.target_group)) continue
 
+          const bonus = 1 + trainingBonus(plan.club_id, plan.target_group)
+
           if (isBot) {
             const updates: Record<string, number> = {}
             for (const stat of ALL_STATS) {
               const slots = (focusStats[stat] ?? 0) as number
               if (slots === 0) continue
-              updates[stat] = clamp((player[stat] ?? 0) + slots * 0.2)
+              updates[stat] = clamp((player[stat] ?? 0) + slots * 0.2 * bonus)
             }
             if (Object.keys(updates).length) {
               await supabase.from('players').update(updates).eq('id', player.id)
@@ -156,7 +194,7 @@ serve(async (req) => {
             if (slots === 0) continue
             const current     = player[stat] ?? 0
             const initialStat = (initialStats[stat] ?? current) as number
-            const gain        = slots * 0.3 * ageFactor(age) * capFactor(current, initialStat)
+            const gain        = slots * 0.3 * ageFactor(age) * capFactor(current, initialStat) * bonus
             statUpdates[stat] = clamp(current + gain)
           }
           if (Object.keys(statUpdates).length) {
@@ -199,7 +237,11 @@ serve(async (req) => {
     if (isFirstOfMonth) {
       const { data: clubs } = await supabase
         .from('clubs')
-        .select('id, balance, reputation, supporters_count, is_bot')
+        .select(`
+          id, balance, reputation, supporters_count, is_bot,
+          stadium_level, training_facility_level, medical_center_level,
+          academy_level, merchandising_level
+        `)
 
       for (const club of clubs ?? []) {
         // ✅ monthly_salary au lieu de salary, is_active = true au lieu de status = 'active'
@@ -209,22 +251,33 @@ serve(async (req) => {
           .eq('club_id', club.id)
           .eq('is_active', true)
         // ✅ monthly_salary
-        const totalSalary = (contracts ?? []).reduce((s, c) => s + (c.monthly_salary ?? 0), 0)
+        const totalSalary     = (contracts ?? []).reduce((s, c) => s + (c.monthly_salary ?? 0), 0)
+        const totalCoachSalary = coachSalaryMap[club.id] ?? 0
 
+        const merchLevel = club.merchandising_level ?? 1
         const sponsors      = 25000 + (club.reputation ?? 50) * 400
-        const merchandising = (club.supporters_count ?? 1000) * 10
-        const maintenance   = 13000
+        const merchandising = Math.round((club.supporters_count ?? 1000) * 10 * (1 + 0.25 * (merchLevel - 1)))
+        // Entretien : base + coût proportionnel à chaque niveau d'infrastructure
+        const maintenance = Math.round(
+          8000
+          + (club.stadium_level ?? 1) * 3000
+          + (club.training_facility_level ?? 0) * 2000
+          + (club.medical_center_level ?? 0) * 1800
+          + (club.academy_level ?? 1) * 1000
+          + merchLevel * 800
+        )
         const fixedCosts    = 5000
 
-        const netFlow    = sponsors + merchandising - totalSalary - maintenance - fixedCosts
+        const netFlow    = sponsors + merchandising - totalSalary - totalCoachSalary - maintenance - fixedCosts
         const newBalance = (club.balance ?? 0) + netFlow
 
         const txRows = [
-          { club_id: club.id, type: 'salary',      amount: totalSalary,   description: 'Masse salariale mensuelle' },
-          { club_id: club.id, type: 'sponsorship', amount: sponsors,       description: 'Revenus sponsoring mensuel' },
-          { club_id: club.id, type: 'merchandise', amount: merchandising,  description: 'Merchandising mensuel' },
-          { club_id: club.id, type: 'maintenance', amount: maintenance,    description: 'Entretien du stade' },
-          { club_id: club.id, type: 'fixed_costs', amount: fixedCosts,     description: 'Frais fixes mensuels' },
+          { club_id: club.id, type: 'salary',       amount: totalSalary,      description: 'Masse salariale mensuelle' },
+          { club_id: club.id, type: 'staff_salary',  amount: totalCoachSalary, description: 'Salaires du staff technique' },
+          { club_id: club.id, type: 'sponsorship',   amount: sponsors,         description: 'Revenus sponsoring mensuel' },
+          { club_id: club.id, type: 'merchandise',   amount: merchandising,    description: 'Merchandising mensuel' },
+          { club_id: club.id, type: 'maintenance',   amount: maintenance,      description: 'Entretien des infrastructures' },
+          { club_id: club.id, type: 'fixed_costs',   amount: fixedCosts,       description: 'Frais fixes mensuels' },
         ].filter((t) => t.amount > 0)
 
         await supabase.from('transactions').insert(txRows)
@@ -307,9 +360,13 @@ serve(async (req) => {
     // ── 7. Académie (le dimanche) ─────────────────────────────────────────────
     if (isSunday) {
       // ✅ uniquement pour les clubs non-bot
-      const { data: humanClubs } = await supabase.from('clubs').select('id').eq('is_bot', false)
+      const { data: humanClubs } = await supabase.from('clubs').select('id, academy_level').eq('is_bot', false)
 
-      const POSITIONS    = ['PROP','HOOKER','LOCK','FLANKER','NUMBER_8','SCRUM_HALF','FLY_HALF','CENTER','WING','FULLBACK']
+      // ⚠️ Valeurs minuscules + underscore : l'enum position_group réel n'a pas
+      // les mêmes valeurs que l'ancien tableau en majuscules (bug qui faisait
+      // échouer silencieusement tous les inserts académie depuis le début —
+      // confirmé : 0 joueur avec source='academy' en base malgré des mois de tick).
+      const POSITIONS    = ['prop','hooker','lock','flanker','number_8','scrum_half','fly_half','center','wing','full_back']
       const NATIONALITIES= ['Français','Anglais','Irlandais','Gallois','Néo-Zélandais','Australien','Argentin','Afrique du Sud','Fidjien','Samoan']
       const FIRST_NAMES  = ['Lucas','Hugo','Nathan','Léo','Théo','Antoine','Maxime','Pierre','Julien','Axel']
       const LAST_NAMES   = ['Martin','Bernard','Thomas','Robert','Richard','Petit','Durand','Simon','Michel','Lefebvre']
@@ -321,8 +378,12 @@ serve(async (req) => {
 
       let totalAcademy = 0
       for (const club of humanClubs ?? []) {
-        const count = randInt(0, 2)
+        // Un centre de formation de meilleur niveau produit plus de jeunes, et de meilleure qualité
+        const academyLevel = club.academy_level ?? 1
+        const count = randInt(0, 2 + academyLevel - 1)
         if (count === 0) continue
+        const statFloor = 15 + (academyLevel - 1) * 3
+        const statCeil  = 35 + (academyLevel - 1) * 3
         const newPlayers = Array.from({ length: count }).map(() => ({
           club_id:          club.id,
           primary_position: POSITIONS[randInt(0, POSITIONS.length - 1)],  // ✅ primary_position
@@ -331,19 +392,50 @@ serve(async (req) => {
           nationality:      NATIONALITIES[randInt(0, NATIONALITIES.length - 1)],
           first_name:       FIRST_NAMES[randInt(0, FIRST_NAMES.length - 1)],
           last_name:        LAST_NAMES[randInt(0, LAST_NAMES.length - 1)],
+          height_cm:        randInt(175, 198),  // ✅ NOT NULL sans défaut
+          weight_kg:        randInt(80, 118),   // ✅ NOT NULL sans défaut
           energy:           100,
           // ✅ pas is_injured
           injury_days_left: 0,
           retired:          false,
           initial_stats:    {},  // sera rempli avec les stats générées
           ...Object.fromEntries(
-            ALL_STATS.map((s) => [s, randInt(15, 35)])
+            ALL_STATS.map((s) => [s, randInt(statFloor, statCeil)])
           ),
         }))
-        await supabase.from('players').insert(newPlayers)
+        const { error: academyErr } = await supabase.from('players').insert(newPlayers)
+        if (academyErr) { log.push(`Académie: erreur insert club ${club.id} — ${academyErr.message}`); continue }
         totalAcademy += count
       }
       log.push(`Académie: ${totalAcademy} talents générés`)
+
+      // ── Agents libres : petit flux hebdomadaire pour alimenter le marché ────
+      const freeAgentCount = randInt(2, 5)
+      const freeAgents = Array.from({ length: freeAgentCount }).map(() => {
+        const age = randInt(19, 33)
+        const dob = new Date()
+        dob.setFullYear(dob.getFullYear() - age)
+        return {
+          club_id:          null,
+          primary_position: POSITIONS[randInt(0, POSITIONS.length - 1)],
+          date_of_birth:    dob.toISOString().slice(0, 10),
+          source:           'transfer_market',
+          nationality:      NATIONALITIES[randInt(0, NATIONALITIES.length - 1)],
+          first_name:       FIRST_NAMES[randInt(0, FIRST_NAMES.length - 1)],
+          last_name:        LAST_NAMES[randInt(0, LAST_NAMES.length - 1)],
+          height_cm:        randInt(175, 198),
+          weight_kg:        randInt(80, 118),
+          energy:           100,
+          injury_days_left: 0,
+          retired:          false,
+          initial_stats:    {},
+          ...Object.fromEntries(ALL_STATS.map((s) => [s, randInt(35, 70)])),
+        }
+      })
+      const { error: freeAgentErr } = await supabase.from('players').insert(freeAgents)
+      log.push(freeAgentErr
+        ? `Agents libres: erreur insert — ${freeAgentErr.message}`
+        : `Agents libres: ${freeAgentCount} nouveaux joueurs sur le marché`)
     }
 
     return new Response(

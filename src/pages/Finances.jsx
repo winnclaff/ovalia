@@ -7,11 +7,13 @@ import Layout from '../components/Layout'
 
 const TYPE_META = {
   salary:       { label: 'Salaires',       color: '#e74c3c', sign: -1 },
+  staff_salary: { label: 'Salaires du staff', color: '#d35400', sign: -1 },
   sponsorship:  { label: 'Sponsors',       color: '#1B7A4A', sign:  1 },
   merchandise:  { label: 'Merchandising',  color: '#27ae60', sign:  1 },
   ticket:       { label: 'Billetterie',    color: '#3498db', sign:  1 },
   maintenance:  { label: 'Entretien',      color: '#F5820D', sign: -1 },
   fixed_costs:  { label: 'Frais fixes',    color: '#c0392b', sign: -1 },
+  infrastructure: { label: 'Infrastructure', color: '#34495e', sign: -1 },
   transfer_in:  { label: 'Transfert +',    color: '#27ae60', sign:  1 },
   transfer_out: { label: 'Transfert −',    color: '#e74c3c', sign: -1 },
   prize:        { label: 'Prime de ligue', color: '#8B5CF6', sign:  1 },

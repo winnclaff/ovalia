@@ -15,7 +15,7 @@ const POSITION_META = {
   FLY_HALF:   { label: 'Ouvreur',        short: 'OUV', group: 'Arrières' },
   CENTER:     { label: 'Centre',         short: 'CTR', group: 'Arrières' },
   WING:       { label: 'Ailier',         short: 'AIL', group: 'Arrières' },
-  FULLBACK:   { label: 'Arrière',        short: 'ARR', group: 'Arrières' },
+  FULL_BACK:  { label: 'Arrière',        short: 'ARR', group: 'Arrières' },
 }
 
 const ALL_STATS = [
@@ -70,14 +70,57 @@ const matchesAge = (age, range) => {
 const fmt = (n) =>
   (n ?? 0).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })
 
+// Salaire "attendu" par un joueur selon son niveau (même formule que le
+// salaire suggéré déjà affiché). En dessous de 70% de ce montant, le joueur
+// refuse toujours ; entre 70% et 100%, la chance d'acceptation monte
+// linéairement ; au-dessus, il accepte toujours.
+const expectedSalary = (overall) => Math.round((overall * 80 + 1000) / 500) * 500
+
+const acceptanceChance = (salary, expected) => {
+  const ratio = expected > 0 ? salary / expected : 1
+  if (ratio >= 1) return 1
+  if (ratio <= 0.7) return 0
+  return (ratio - 0.7) / 0.3
+}
+
+const computeAge = (dateOfBirth) => {
+  if (!dateOfBirth) return null
+  const today = new Date()
+  const dob = new Date(dateOfBirth)
+  let age = today.getFullYear() - dob.getFullYear()
+  const m = today.getMonth() - dob.getMonth()
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--
+  return age
+}
+
 // ─── Contract modal ───────────────────────────────────────────────────────────
 
-function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
+function ContractModal({ player, listing, clubBalance, onConfirm, onClose, saving }) {
   const [salary, setSalary]     = useState(5000)
   const [duration, setDuration] = useState(12)
+  const [rejected, setRejected] = useState(false)
   const overall = getOverall(player)
-  const suggested = Math.round((overall * 80 + 1000) / 500) * 500
-  const canAfford = clubBalance >= salary
+  const suggested = expectedSalary(overall)
+  const chance = acceptanceChance(salary, suggested)
+  const transferFee = listing?.asking_price ?? 0
+  const totalUpfront = salary + transferFee
+  const canAfford = clubBalance >= totalUpfront
+  const age = computeAge(player.date_of_birth)
+
+  const acceptanceLabel = chance >= 0.9 ? 'Offre généreuse'
+    : chance >= 0.5 ? 'Bonne chance d\'acceptation'
+    : chance > 0 ? 'Risque de refus élevé'
+    : 'Refus certain'
+  const acceptanceColor = chance >= 0.9 ? '#1B7A4A' : chance >= 0.5 ? '#F5820D' : '#e74c3c'
+
+  const handleConfirmClick = () => {
+    setRejected(false)
+    if (Math.random() < chance) {
+      onConfirm(salary, duration)
+    } else {
+      setRejected(true)
+    }
+  }
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -86,9 +129,11 @@ function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
           <div>
             <h3 className="modal-player-name">{playerName(player)}</h3>
             <div style={{ fontSize: 13, color: '#888', marginTop: 2 }}>
-              {getPosMeta(player.position).label}
-              {player.age ? ` · ${player.age} ans` : ''}
+              {getPosMeta(player.primary_position).label}
+              {age != null ? ` · ${age} ans` : ''}
               {player.nationality ? ` · ${player.nationality}` : ''}
+              {player.height_cm ? ` · ${player.height_cm} cm` : ''}
+              {player.weight_kg ? ` · ${player.weight_kg} kg` : ''}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -100,10 +145,19 @@ function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
         </div>
 
         <div className="recr-modal-body">
-          <div className="recr-suggested">
-            <span className="recr-suggested-label">Salaire suggéré</span>
-            <span className="recr-suggested-value">{fmt(suggested)} / mois</span>
-          </div>
+          {listing && (
+            <div className="recr-suggested">
+              <span className="recr-suggested-label">Prix de transfert demandé</span>
+              <span className="recr-suggested-value">{fmt(transferFee)}</span>
+            </div>
+          )}
+
+          {!listing && (
+            <div className="recr-suggested">
+              <span className="recr-suggested-label">Salaire suggéré</span>
+              <span className="recr-suggested-value">{fmt(suggested)} / mois</span>
+            </div>
+          )}
 
           <div className="recr-field">
             <label className="recr-label">Salaire mensuel</label>
@@ -115,13 +169,26 @@ function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
                 min={500}
                 max={500000}
                 step={500}
-                onChange={(e) => setSalary(Math.max(500, Number(e.target.value)))}
+                onChange={(e) => { setSalary(Math.max(500, Number(e.target.value))); setRejected(false) }}
               />
               <span className="recr-currency">€ / mois</span>
             </div>
+            <div className="recr-acceptance-row">
+              <div className="recr-acceptance-bar-track">
+                <div className="recr-acceptance-bar-fill" style={{ width: `${chance * 100}%`, background: acceptanceColor }} />
+              </div>
+              <span className="recr-acceptance-label" style={{ color: acceptanceColor }}>
+                {acceptanceLabel} ({Math.round(chance * 100)}%)
+              </span>
+            </div>
             {!canAfford && (
               <p className="recr-error">
-                Solde insuffisant ({fmt(clubBalance)}) pour payer le premier mois.
+                Solde insuffisant ({fmt(clubBalance)}) pour ce transfert.
+              </p>
+            )}
+            {rejected && (
+              <p className="recr-error">
+                {playerName(player)} juge cette offre trop basse et refuse de signer. Proposez plus.
               </p>
             )}
           </div>
@@ -142,10 +209,12 @@ function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
           </div>
 
           <div className="recr-summary">
-            <div className="recr-summary-row">
-              <span>Coût total estimé</span>
-              <span className="recr-summary-val">{fmt(salary * duration)}</span>
-            </div>
+            {listing && (
+              <div className="recr-summary-row">
+                <span>Prix de transfert</span>
+                <span className="recr-summary-val" style={{ color: '#e74c3c' }}>−{fmt(transferFee)}</span>
+              </div>
+            )}
             <div className="recr-summary-row">
               <span>Premier mois déduit maintenant</span>
               <span className="recr-summary-val" style={{ color: '#e74c3c' }}>−{fmt(salary)}</span>
@@ -153,7 +222,7 @@ function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
             <div className="recr-summary-row">
               <span>Trésorerie après signature</span>
               <span className="recr-summary-val" style={{ color: canAfford ? '#1B7A4A' : '#e74c3c' }}>
-                {fmt(clubBalance - salary)}
+                {fmt(clubBalance - totalUpfront)}
               </span>
             </div>
           </div>
@@ -163,10 +232,10 @@ function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
           <button className="btn btn-outline" onClick={onClose} disabled={saving}>Annuler</button>
           <button
             className="btn btn-primary"
-            onClick={() => onConfirm(salary, duration)}
-            disabled={saving || !canAfford}
+            onClick={handleConfirmClick}
+            disabled={saving || !canAfford || chance === 0}
           >
-            {saving ? 'Signature…' : 'Signer le contrat'}
+            {saving ? 'Signature…' : listing ? 'Acheter le joueur' : 'Signer le contrat'}
           </button>
         </div>
       </div>
@@ -176,10 +245,11 @@ function ContractModal({ player, clubBalance, onConfirm, onClose, saving }) {
 
 // ─── Player card row ──────────────────────────────────────────────────────────
 
-function PlayerRow({ player, onRecruit }) {
-  const meta    = getPosMeta(player.position)
+function PlayerRow({ player, listing, onRecruit }) {
+  const meta    = getPosMeta(player.primary_position)
   const overall = getOverall(player)
   const isAvant = meta.group === 'Avants'
+  const age     = computeAge(player.date_of_birth)
 
   return (
     <tr className="recr-player-row">
@@ -189,16 +259,22 @@ function PlayerRow({ player, onRecruit }) {
         </span>
       </td>
       <td className="recr-name">{playerName(player)}</td>
-      <td className="recr-cell">{player.age ? `${player.age} ans` : '—'}</td>
+      <td className="recr-cell">{age != null ? `${age} ans` : '—'}</td>
       <td className="recr-cell">{player.nationality ?? '—'}</td>
+      <td className="recr-cell">
+        {player.height_cm ? `${player.height_cm} cm` : '—'} · {player.weight_kg ? `${player.weight_kg} kg` : '—'}
+      </td>
       <td>
         <span className="overall-badge" style={{ background: overallColor(overall) }}>
           {overall}
         </span>
       </td>
+      {listing && (
+        <td><span className="market-price-badge">{fmt(listing.asking_price)}</span></td>
+      )}
       <td>
-        <button className="recr-btn-recruit" onClick={() => onRecruit(player)}>
-          Recruter
+        <button className="recr-btn-recruit" onClick={() => onRecruit(player, listing)}>
+          {listing ? 'Acheter' : 'Recruter'}
         </button>
       </td>
     </tr>
@@ -208,9 +284,10 @@ function PlayerRow({ player, onRecruit }) {
 // ─── Academy player row ───────────────────────────────────────────────────────
 
 function AcademyRow({ player, onPromote, promoting }) {
-  const meta    = getPosMeta(player.position)
+  const meta    = getPosMeta(player.primary_position)
   const overall = getOverall(player)
   const isAvant = meta.group === 'Avants'
+  const age     = computeAge(player.date_of_birth)
 
   return (
     <tr className="recr-player-row">
@@ -220,8 +297,11 @@ function AcademyRow({ player, onPromote, promoting }) {
         </span>
       </td>
       <td className="recr-name">{playerName(player)}</td>
-      <td className="recr-cell">{player.age ? `${player.age} ans` : '—'}</td>
+      <td className="recr-cell">{age != null ? `${age} ans` : '—'}</td>
       <td className="recr-cell">{player.nationality ?? '—'}</td>
+      <td className="recr-cell">
+        {player.height_cm ? `${player.height_cm} cm` : '—'} · {player.weight_kg ? `${player.weight_kg} kg` : '—'}
+      </td>
       <td>
         <span className="overall-badge" style={{ background: overallColor(overall) }}>
           {overall}
@@ -246,13 +326,17 @@ export default function Recrutement({ session }) {
   const navigate = useNavigate()
   const [club, setClub]               = useState(null)
   const [tab, setTab]                 = useState('market')
+  const [marketView, setMarketView]   = useState('free')
   const [marketPlayers, setMarket]    = useState([])
+  const [listedPlayers, setListed]    = useState([])
   const [academyPlayers, setAcademy]  = useState([])
   const [loadingMarket, setLM]        = useState(true)
+  const [loadingListed, setLL]        = useState(true)
   const [loadingAcademy, setLA]       = useState(true)
   const [signing, setSigning]         = useState(false)
   const [promoting, setPromoting]     = useState(null)
   const [modalPlayer, setModalPlayer] = useState(null)
+  const [modalListing, setModalListing] = useState(null)
   const [successMsg, setSuccessMsg]   = useState('')
 
   // Filters
@@ -272,6 +356,7 @@ export default function Recrutement({ session }) {
     if (!c) { navigate('/create-club', { replace: true }); return }
     setClub(c)
     loadMarket()
+    loadListed(c.id)
     loadAcademy(c.id)
   }
 
@@ -288,35 +373,63 @@ export default function Recrutement({ session }) {
     setLM(false)
   }
 
+  const loadListed = async (clubId) => {
+    setLL(true)
+    const { data } = await supabase
+      .from('transfer_listings')
+      .select('id, asking_price, club_id, players(*)')
+      .eq('status', 'active')
+      .neq('club_id', clubId)
+      .limit(300)
+    setListed((data ?? []).filter((row) => row.players).map((row) => ({
+      listing: { id: row.id, asking_price: row.asking_price },
+      player: row.players,
+    })))
+    setLL(false)
+  }
+
   const loadAcademy = async (clubId) => {
     setLA(true)
+    const cutoff = new Date()
+    cutoff.setFullYear(cutoff.getFullYear() - 20)
     const { data } = await supabase
       .from('players')
       .select('*')
       .eq('club_id', clubId)
       .eq('source', 'academy')
-      .lt('age', 20)
-      .order('age', { ascending: true })
+      .gte('date_of_birth', cutoff.toISOString().slice(0, 10))
+      .order('date_of_birth', { ascending: false })
     setAcademy(data ?? [])
     setLA(false)
   }
 
-  // ── Recruit flow ────────────────────────────────────────────────────────────
+  // ── Recruit flow (agent libre) ──────────────────────────────────────────────
+
+  const openModal = (player, listing = null) => {
+    setModalPlayer(player)
+    setModalListing(listing)
+  }
+
+  const closeModal = () => {
+    if (signing) return
+    setModalPlayer(null)
+    setModalListing(null)
+  }
 
   const handleRecruit = async (salary, duration) => {
     if (!modalPlayer || !club) return
+    if (modalListing) return handleBuyListed(salary, duration)
     setSigning(true)
 
     const startDate = new Date()
     const endDate   = new Date(startDate)
     endDate.setMonth(endDate.getMonth() + duration)
 
-    // 1. Insert contract
+    // 1. Insert contract (pas de colonne duration_months : la durée découle de start/end_date)
     const { error: contractErr } = await supabase.from('contracts').insert({
       player_id:      modalPlayer.id,
       club_id:        club.id,
       monthly_salary:  salary,
-      duration_months: duration,
       start_date:      startDate.toISOString().slice(0, 10),
       end_date:        endDate.toISOString().slice(0, 10),
       is_active:       true,
@@ -344,7 +457,32 @@ export default function Recrutement({ session }) {
     // 4. Update local state
     setClub((c) => ({ ...c, balance: newBalance }))
     setMarket((prev) => prev.filter((p) => p.id !== modalPlayer.id))
-    setModalPlayer(null)
+    closeModal()
+    setSigning(false)
+    setSuccessMsg(`${playerName(modalPlayer)} a rejoint votre effectif !`)
+    setTimeout(() => setSuccessMsg(''), 4000)
+  }
+
+  // ── Achat d'un joueur en vente (via fonction Postgres SECURITY DEFINER) ─────
+
+  const handleBuyListed = async (salary, duration) => {
+    setSigning(true)
+    const { error } = await supabase.rpc('buy_listed_player', {
+      p_listing_id: modalListing.id,
+      p_monthly_salary: salary,
+      p_duration_months: duration,
+    })
+
+    if (error) {
+      setSigning(false)
+      alert(`Erreur lors du transfert : ${error.message}`)
+      return
+    }
+
+    const newBalance = (club.balance ?? 0) - salary - modalListing.asking_price
+    setClub((c) => ({ ...c, balance: newBalance }))
+    setListed((prev) => prev.filter((row) => row.listing.id !== modalListing.id))
+    closeModal()
     setSigning(false)
     setSuccessMsg(`${playerName(modalPlayer)} a rejoint votre effectif !`)
     setTimeout(() => setSuccessMsg(''), 4000)
@@ -373,10 +511,10 @@ export default function Recrutement({ session }) {
   const filteredMarket = marketPlayers.filter((p) => {
     const overall = getOverall(p)
     if (filterPos !== 'all') {
-      const posKey = (p.position ?? '').toUpperCase().replace(/[-\s]/g, '_')
+      const posKey = (p.primary_position ?? '').toUpperCase().replace(/[-\s]/g, '_')
       if (posKey !== filterPos) return false
     }
-    if (!matchesAge(p.age, filterAge)) return false
+    if (!matchesAge(computeAge(p.date_of_birth), filterAge)) return false
     if (overall < filterMin) return false
     return true
   })
@@ -422,6 +560,62 @@ export default function Recrutement({ session }) {
         {/* ── Marché ─────────────────────────────────────────────────────── */}
         {tab === 'market' && (
           <>
+            <div className="market-subtabs">
+              <button
+                className={`filter-tab${marketView === 'free' ? ' active' : ''}`}
+                onClick={() => setMarketView('free')}
+              >
+                Agents libres
+                {!loadingMarket && <span className="filter-count">{marketPlayers.length}</span>}
+              </button>
+              <button
+                className={`filter-tab${marketView === 'listed' ? ' active' : ''}`}
+                onClick={() => setMarketView('listed')}
+              >
+                Joueurs en vente
+                {!loadingListed && <span className="filter-count">{listedPlayers.length}</span>}
+              </button>
+            </div>
+
+            {marketView === 'listed' && (
+              loadingListed ? (
+                <p style={{ color: '#888' }}>Chargement…</p>
+              ) : listedPlayers.length === 0 ? (
+                <div className="card" style={{ textAlign: 'center', padding: 40 }}>
+                  <p style={{ color: '#aaa' }}>Aucun joueur en vente pour le moment.</p>
+                </div>
+              ) : (
+                <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                  <table className="recr-table">
+                    <thead>
+                      <tr>
+                        <th>Poste</th>
+                        <th>Nom</th>
+                        <th>Âge</th>
+                        <th>Nationalité</th>
+                        <th>Gabarit</th>
+                        <th>Note</th>
+                        <th>Prix</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {listedPlayers.map(({ listing, player }) => (
+                        <PlayerRow
+                          key={listing.id}
+                          player={player}
+                          listing={listing}
+                          onRecruit={openModal}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            )}
+
+            {marketView === 'free' && (
+            <>
             {/* Filters */}
             <div className="recr-filters">
               <div className="recr-filter-group">
@@ -494,6 +688,7 @@ export default function Recrutement({ session }) {
                       <th>Nom</th>
                       <th>Âge</th>
                       <th>Nationalité</th>
+                      <th>Gabarit</th>
                       <th>Note</th>
                       <th />
                     </tr>
@@ -503,12 +698,14 @@ export default function Recrutement({ session }) {
                       <PlayerRow
                         key={p.id}
                         player={p}
-                        onRecruit={setModalPlayer}
+                        onRecruit={openModal}
                       />
                     ))}
                   </tbody>
                 </table>
               </div>
+            )}
+            </>
             )}
           </>
         )}
@@ -546,6 +743,7 @@ export default function Recrutement({ session }) {
                       <th>Nom</th>
                       <th>Âge</th>
                       <th>Nationalité</th>
+                      <th>Gabarit</th>
                       <th>Note</th>
                       <th />
                     </tr>
@@ -572,9 +770,10 @@ export default function Recrutement({ session }) {
       {modalPlayer && club && (
         <ContractModal
           player={modalPlayer}
+          listing={modalListing}
           clubBalance={club.balance ?? 0}
           onConfirm={handleRecruit}
-          onClose={() => !signing && setModalPlayer(null)}
+          onClose={closeModal}
           saving={signing}
         />
       )}

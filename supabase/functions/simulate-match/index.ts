@@ -14,6 +14,7 @@ interface Player {
   passing: number; kicking: number; scrum: number; lineout: number
   rucking: number; tackling: number; breaking: number; def_reading: number
   discipline: number; composure: number; energy: number
+  height_cm?: number; weight_kg?: number
 }
 
 interface Tactic {
@@ -51,13 +52,46 @@ const avg     = (vals: number[]) => vals.length ? vals.reduce((a, b) => a + b, 0
 const clamp   = (v: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v))
 
 const FORWARD_POS = ['PROP','HOOKER','LOCK','FLANKER','NUMBER_8']
-const BACK_POS    = ['SCRUM_HALF','FLY_HALF','CENTER','WING','FULLBACK']
+const BACK_POS    = ['SCRUM_HALF','FLY_HALF','CENTER','WING','FULL_BACK']
 const normalPos   = (p: string) => (p ?? '').toUpperCase().replace(/[-\s]/g, '_')
 
 // ✅ primary_position (au lieu de position)
 function isForward(p: Player) { return FORWARD_POS.includes(normalPos(p.primary_position)) }
 function isBack(p: Player)    { return BACK_POS.includes(normalPos(p.primary_position)) }
 function byPos(ps: Player[], pred: (p: Player) => boolean) { return ps.filter(pred) }
+
+// ─── Gabarit (taille/poids) ────────────────────────────────────────────────────
+// Impact léger sur le match uniquement (rien n'est modifié en base) : un pilier
+// trop grand ou trop léger perd un peu de puissance en mêlée, un ailier trop
+// lourd perd un peu de vitesse en attaque. Chaque poste a une fourchette idéale ;
+// rester dedans ne change rien, s'en écarter coûte jusqu'à 8%.
+const IDEAL_BUILD: Record<string, { height: [number, number]; weight: [number, number] }> = {
+  PROP:       { height: [178, 192], weight: [108, 128] },
+  HOOKER:     { height: [175, 188], weight: [100, 118] },
+  LOCK:       { height: [196, 210], weight: [108, 122] },
+  FLANKER:    { height: [185, 197], weight: [98, 112] },
+  NUMBER_8:   { height: [188, 200], weight: [102, 116] },
+  SCRUM_HALF: { height: [168, 180], weight: [75, 88] },
+  FLY_HALF:   { height: [176, 188], weight: [82, 94] },
+  CENTER:     { height: [180, 193], weight: [90, 104] },
+  WING:       { height: [178, 193], weight: [82, 96] },
+  FULL_BACK:  { height: [178, 191], weight: [84, 98] },
+}
+const MORPHOLOGY_MAX_PENALTY = 0.08
+
+function deviationFraction(value: number, [lo, hi]: [number, number]): number {
+  if (value >= lo && value <= hi) return 0
+  const span = (hi - lo) / 2
+  const dist = value < lo ? lo - value : value - hi
+  return clamp(dist / span, 0, 1)
+}
+
+function morphologyFactor(p: Player): number {
+  const ideal = IDEAL_BUILD[normalPos(p.primary_position)]
+  if (!ideal || !p.height_cm || !p.weight_kg) return 1
+  const dev = (deviationFraction(p.height_cm, ideal.height) + deviationFraction(p.weight_kg, ideal.weight)) / 2
+  return 1 - dev * MORPHOLOGY_MAX_PENALTY
+}
 
 // ─── Score d'équipe ───────────────────────────────────────────────────────────
 
@@ -78,9 +112,9 @@ function teamScores(team: TeamData) {
   const homeMult   = isHome ? 1.05 : 1
 
   const base = {
-    scrum:   avg([...fwd.map((p) => p.scrum), ...fwd.map((p) => p.strength)]) * (0.7 + scrum_agg * 0.6),
+    scrum:   avg([...fwd.map((p) => p.scrum), ...fwd.map((p) => p.strength * morphologyFactor(p))]) * (0.7 + scrum_agg * 0.6),
     lineout: avg([...fwd.map((p) => p.lineout), ...fwd.map((p) => p.agility)]) * (0.7 + lineout_agg * 0.6),
-    attack:  avg([...bk.map((p) => p.breaking), ...bk.map((p) => p.passing), ...bk.map((p) => p.speed)])
+    attack:  avg([...bk.map((p) => p.breaking), ...bk.map((p) => p.passing), ...bk.map((p) => p.speed * morphologyFactor(p))])
              * (0.8 + play_style * 0.4) * (0.8 + tempo * 0.4),
     defense: avg([...all.map((p) => p.tackling), ...all.map((p) => p.def_reading), ...all.map((p) => p.discipline)]),
     kicking: avg([...bk.slice(0, 3).map((p) => p.kicking), ...bk.slice(0, 3).map((p) => p.composure)])
@@ -405,7 +439,7 @@ serve(async (req) => {
 
     const { data: clubsData } = await supabase
       .from('clubs')
-      .select('id, is_bot, performance_penalty')
+      .select('id, is_bot, performance_penalty, balance, reputation, stadium_level')
       .in('id', [match.home_club_id, match.away_club_id])
 
     const clubMap  = Object.fromEntries((clubsData ?? []).map((c) => [c.id, c]))
@@ -474,6 +508,28 @@ serve(async (req) => {
     for (const p of [...finalHomePlayers, ...finalAwayPlayers]) {
       const newEnergy = Math.max(0, (p.energy ?? 80) - energyDrain)
       await supabase.from('players').update({ energy: newEnergy }).eq('id', p.id)
+    }
+
+    // Billetterie : revenu pour l'équipe à domicile, dépendant de la capacité
+    // du stade et de l'affluence (réputation + variance légère).
+    // ⚠️ Formule dupliquée (avec ce même commentaire) dans src/lib/finance.js
+    {
+      const capacity        = 3000 + (homeClub.stadium_level ?? 1) * 1500
+      const attendanceRate  = clamp(0.45 + (homeClub.reputation ?? 50) / 250 + rand(-0.05, 0.05), 0.35, 0.95)
+      const rateMultiplier  = isFriendly ? 0.3 : 1
+      const ticketRevenue   = Math.round(capacity * attendanceRate * 15 * rateMultiplier)
+
+      if (ticketRevenue > 0) {
+        await supabase.from('transactions').insert({
+          club_id: match.home_club_id,
+          type: 'ticket',
+          amount: ticketRevenue,
+          description: isFriendly ? 'Billetterie — match amical' : 'Billetterie — match de championnat',
+        })
+        await supabase.from('clubs')
+          .update({ balance: (homeClub.balance ?? 0) + ticketRevenue })
+          .eq('id', match.home_club_id)
+      }
     }
 
     return new Response(

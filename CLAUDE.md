@@ -72,9 +72,15 @@ react-router-dom. Routes protégées (redirige vers /login si pas connecté).
 
 \## État actuel
 
-\- Auth fonctionnelle (inscription + connexion)
+\- Auth, création de club, dashboard, effectif, ligue, match (simulation + Realtime), entraînement collectif, tactique, finances, recrutement (marché + académie) et profil sont tous implémentés.
 
-\- Dashboard placeholder (affiche email, pas encore de club)
+\- Edge Functions : nightly-tick (tick nocturne 4h), simulate-match, generate-calendar, end-season.
 
-\- Prochaine étape : page de création de club (nom, couleurs, stade → attribution d'un bot)
+\- Staff technique (table `coaches` : head\_coach, forwards\_coach, backs\_coach, medic — niveau 1-5, salaire croissant) et infrastructures (`clubs.stadium\_level`, `training\_facility\_level`, `medical\_center\_level`, `academy\_level`, `merchandising\_level`) gérés depuis la page Infrastructures (`src/pages/Infrastructure.jsx`). Constantes de coût/effet dans `src/lib/finance.js` (dupliquées dans les Edge Functions car Deno ne peut pas les importer).
+
+\- Billetterie : revenu généré à chaque match à domicile dans `simulate-match` (capacité du stade × affluence). Salaires du staff et entretien des infrastructures intégrés au tick mensuel de `nightly-tick`. Le centre d'entraînement débloquera l'entraînement individuel (page Entraînement) — pas encore implémenté.
+
+\- ⚠️ `supabase/cron.sql` contient une clé service\_role en clair et est suivi par git — à régénérer si le dépôt est public.
+
+\- Prochaine étape : entraînement individuel (nécessite le centre d'entraînement), ou affiner l'équilibrage économique des nouvelles formules de finances.
 

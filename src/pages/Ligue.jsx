@@ -54,6 +54,7 @@ function StandingsTable({ standings, userClubId }) {
                 <td className="league-rank">{i + 1}</td>
                 <td className="league-club-name">
                   {s.clubs?.name ?? s.club_name ?? '—'}
+                  {s.clubs?.is_bot && <span className="bot-badge">(bot)</span>}
                   {isUser && <span className="you-badge">vous</span>}
                 </td>
                 <td>{s.played    ?? '—'}</td>
@@ -122,6 +123,7 @@ function ScheduleView({ matches, clubsById, userClubId, currentRound }) {
                     <div key={m.id} className={`match-row${userMatch ? ' match-row-user' : ''}`}>
                       <span className={`match-team home${m.home_club_id === userClubId ? ' match-you' : ''}`}>
                         {home?.name ?? '—'}
+                        {home?.is_bot && <span className="bot-badge">(bot)</span>}
                       </span>
 
                       <span className="match-score-cell">
@@ -136,6 +138,7 @@ function ScheduleView({ matches, clubsById, userClubId, currentRound }) {
 
                       <span className={`match-team away${m.away_club_id === userClubId ? ' match-you' : ''}`}>
                         {away?.name ?? '—'}
+                        {away?.is_bot && <span className="bot-badge">(bot)</span>}
                       </span>
 
                       {userMatch && result && (
@@ -215,7 +218,7 @@ export default function Ligue({ session }) {
     // 3. Classement de la saison
     const { data: allStandings } = await supabase
       .from('standings')
-      .select('*, clubs(id, name, primary_color, secondary_color)')
+      .select('*, clubs(id, name, primary_color, secondary_color, is_bot)')
       .eq('league_season_id', lsId)
       .order('ranking_points', { ascending: false })
 
