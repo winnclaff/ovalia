@@ -114,12 +114,12 @@ const NAV_ITEMS = [
   { to: '/effectif',    label: 'Effectif',     Icon: IconEffectif },
   { to: '/ligue',       label: 'Ligue',        Icon: IconLigue },
   { to: '/match',       label: 'Match',        Icon: IconMatch },
+  { to: '/statistiques', label: 'Statistiques', Icon: IconStatistiques },
   { to: '/entrainement',label: 'Entraînement', Icon: IconEntrainement },
   { to: '/tactique',    label: 'Tactique',     Icon: IconTactique },
   { to: '/finances',    label: 'Finances',     Icon: IconFinances },
   { to: '/recrutement', label: 'Recrutement',  Icon: IconRecrutement },
   { to: '/infrastructure', label: 'Infrastructures', Icon: IconInfrastructure },
-  { to: '/statistiques', label: 'Statistiques',  Icon: IconStatistiques },
 ]
 
 // ─── Component ────────────────────────────────────────────────────────────────
