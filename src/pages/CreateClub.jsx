@@ -1,40 +1,13 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-
-function JerseyPreview({ primary, secondary }) {
-  return (
-    <svg viewBox="0 0 100 90" width="110" height="99" aria-hidden="true">
-      {/* Left half */}
-      <path
-        d="M50,12 L20,18 L4,34 L17,40 L17,80 L50,80 Z"
-        fill={primary}
-        stroke="rgba(0,0,0,0.08)"
-        strokeWidth="0.5"
-      />
-      {/* Right half */}
-      <path
-        d="M50,12 L80,18 L96,34 L83,40 L83,80 L50,80 Z"
-        fill={secondary}
-        stroke="rgba(0,0,0,0.08)"
-        strokeWidth="0.5"
-      />
-      {/* Collar */}
-      <path
-        d="M38,13 Q50,24 62,13"
-        fill="none"
-        stroke="rgba(255,255,255,0.6)"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </svg>
-  )
-}
+import JerseyPreview from '../components/JerseyPreview'
 
 export default function CreateClub({ session }) {
   const navigate = useNavigate()
   const [clubName, setClubName] = useState('')
   const [stadiumName, setStadiumName] = useState('')
+  const [region, setRegion] = useState('')
   const [primaryColor, setPrimaryColor] = useState('#1B7A4A')
   const [secondaryColor, setSecondaryColor] = useState('#F5820D')
   const [loading, setLoading] = useState(false)
@@ -81,6 +54,7 @@ export default function CreateClub({ session }) {
         .update({
           name: clubName.trim(),
           stadium_name: stadiumName.trim(),
+          region: region.trim() || null,
           primary_color: primaryColor,
           secondary_color: secondaryColor,
           is_bot: false,
@@ -132,6 +106,18 @@ export default function CreateClub({ session }) {
           </div>
 
           <div className="form-group">
+            <label className="form-label">Région (optionnel)</label>
+            <input
+              type="text"
+              placeholder="Ex : Occitanie"
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+              maxLength={60}
+              className="input"
+            />
+          </div>
+
+          <div className="form-group">
             <label className="form-label">Couleurs du maillot</label>
             <div className="color-pickers-row">
               <div className="color-picker-item">
@@ -146,7 +132,7 @@ export default function CreateClub({ session }) {
               </div>
 
               <div className="jersey-preview">
-                <JerseyPreview primary={primaryColor} secondary={secondaryColor} />
+                <JerseyPreview primary={primaryColor} secondary={secondaryColor} size={110} />
               </div>
 
               <div className="color-picker-item">

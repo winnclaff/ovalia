@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import Layout from '../components/Layout'
+import ClubLink from '../components/ClubLink'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -102,6 +103,21 @@ const isLineupLocked = (match) => {
   if (nowParis.dateStr > matchParis.dateStr) return true
   if (nowParis.dateStr < matchParis.dateStr) return false
   return nowParis.hour >= 12
+}
+
+// Convertit une heure locale Paris (choisie dans le formulaire amical) en instant UTC réel.
+const parisWallTimeToUtc = (dateStr, timeStr) => {
+  const [y, m, d]   = dateStr.split('-').map(Number)
+  const [hh, mm]    = timeStr.split(':').map(Number)
+  const guess       = new Date(Date.UTC(y, m - 1, d, hh, mm))
+  const fmt3 = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Paris', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+  const parts = Object.fromEntries(fmt3.formatToParts(guess).map((p) => [p.type, p.value]))
+  const asIfParisWereUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour === 24 ? 0 : +parts.hour, +parts.minute, +parts.second)
+  const offsetMs = asIfParisWereUtc - guess.getTime()
+  return new Date(guess.getTime() - offsetMs)
 }
 
 // ─── Lineup sub-components ────────────────────────────────────────────────────
@@ -351,13 +367,17 @@ function LiveMatchView({ match, club, onBack }) {
       {/* Scoreboard */}
       <div className="live-scoreboard card">
         <div className="live-score-row">
-          <span className={`live-team-name${isHome ? ' live-team-you' : ''}`}>{homeClubName}</span>
+          {match.home_club
+            ? <ClubLink club={match.home_club} className={`live-team-name${isHome ? ' live-team-you' : ''}`} />
+            : <span className="live-team-name">{homeClubName}</span>}
           <div className="live-score-box">
             <span className="live-score-num">{liveScore.home}</span>
             <span className="live-score-sep">–</span>
             <span className="live-score-num">{liveScore.away}</span>
           </div>
-          <span className={`live-team-name${!isHome ? ' live-team-you' : ''}`}>{awayClubName}</span>
+          {match.away_club
+            ? <ClubLink club={match.away_club} className={`live-team-name${!isHome ? ' live-team-you' : ''}`} />
+            : <span className="live-team-name">{awayClubName}</span>}
         </div>
         <div className="live-status-row">
           {finished
@@ -442,17 +462,17 @@ function AmicauxTab({ clubId, clubName }) {
   useEffect(() => { loadProposals() }, [clubId])
 
   const loadProposals = async () => {
-    // Propositions reçues (mon club est away, status=scheduled, is_friendly=true)
+    // Propositions reçues (mon club est away, en attente de réponse)
     const { data: received } = await supabase
       .from('matches')
-      .select('*, home_club:clubs!home_club_id(id, name)')
+      .select('*, home_club:clubs!home_club_id(id, name, is_bot)')
       .eq('away_club_id', clubId)
-      .eq('status', 'scheduled')
+      .eq('status', 'proposed')
       .eq('is_friendly', true)
       .is('league_season_id', null)
     setProposals(received ?? [])
 
-    // Amicaux envoyés cette semaine (pour vérifier la limite)
+    // Amicaux envoyés cette semaine (pour vérifier la limite), hors refusés
     const weekAgo = new Date()
     weekAgo.setDate(weekAgo.getDate() - 7)
     const { data: sent } = await supabase
@@ -460,6 +480,7 @@ function AmicauxTab({ clubId, clubName }) {
       .select('away_club_id, scheduled_at')
       .eq('home_club_id', clubId)
       .eq('is_friendly', true)
+      .neq('status', 'cancelled')
       .gte('scheduled_at', weekAgo.toISOString())
     setSentFriendlies(sent ?? [])
   }
@@ -487,14 +508,16 @@ function AmicauxTab({ clubId, clubName }) {
       setMsg({ type: 'err', text: 'Vous avez déjà un amical contre ce club cette semaine.' }); return
     }
 
-    const datetime = `${selectedDate}T${selectedTime}:00.000Z`
+    const scheduledAt = parisWallTimeToUtc(selectedDate, selectedTime)
+    const lineupDeadline = new Date(scheduledAt.getTime() - 60 * 60_000) // 1h avant le coup d'envoi
     setLoading(true)
     const { error } = await supabase.from('matches').insert({
       home_club_id:     clubId,
       away_club_id:     selectedOpponent.id,
       league_season_id: null,
-      scheduled_at:     datetime,
-      status:           'scheduled',
+      scheduled_at:     scheduledAt.toISOString(),
+      lineup_deadline:  lineupDeadline.toISOString(),
+      status:           'proposed',
       is_friendly:      true,
     })
     setLoading(false)
@@ -511,8 +534,10 @@ function AmicauxTab({ clubId, clubName }) {
   }
 
   const handleAccept = async (matchId) => {
-    await supabase.from('matches').update({ status: 'accepted' }).eq('id', matchId)
-    setMsg({ type: 'ok', text: 'Amical accepté !' })
+    const { error } = await supabase.from('matches').update({ status: 'scheduled' }).eq('id', matchId)
+    setMsg(error
+      ? { type: 'err', text: `Erreur : ${error.message}` }
+      : { type: 'ok', text: 'Amical accepté !' })
     loadProposals()
   }
 
@@ -622,7 +647,7 @@ function AmicauxTab({ clubId, clubName }) {
             return (
               <div key={m.id} className="amicaux-proposal-row">
                 <div>
-                  <strong>{m.home_club?.name ?? '?'}</strong>
+                  {m.home_club ? <ClubLink club={m.home_club} /> : <strong>?</strong>}
                   <span className="amicaux-proposal-date"> — {d}</span>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -679,7 +704,7 @@ export default function Match({ session }) {
     const twoHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
     const { data: recentMatch } = await supabase
       .from('matches')
-      .select('*, home_club:clubs!home_club_id(id,name), away_club:clubs!away_club_id(id,name)')
+      .select('*, home_club:clubs!home_club_id(id,name,is_bot), away_club:clubs!away_club_id(id,name,is_bot)')
       .or(`home_club_id.eq.${club.id},away_club_id.eq.${club.id}`)
       .in('status', ['in_progress', 'lineups_locked', 'completed'])
       .gte('scheduled_at', twoHoursAgo)
@@ -696,7 +721,7 @@ export default function Match({ session }) {
     // pour permettre la consultation en lecture seule une fois verrouillé.
     const { data: match } = await supabase
       .from('matches')
-      .select('*, home_club:clubs!home_club_id(id,name), away_club:clubs!away_club_id(id,name)')
+      .select('*, home_club:clubs!home_club_id(id,name,is_bot), away_club:clubs!away_club_id(id,name,is_bot)')
       .or(`home_club_id.eq.${club.id},away_club_id.eq.${club.id}`)
       .in('status', ['scheduled', 'lineups_locked'])
       .is('home_score', null)
@@ -854,13 +879,13 @@ export default function Match({ session }) {
               <>
                 <div className="card match-info-card">
                   <div className="match-info-teams">
-                    <span className={`match-info-team${nextMatch.home_club_id === clubId ? ' match-info-you' : ''}`}>
-                      {nextMatch.home_club?.name ?? '?'}
-                    </span>
+                    {nextMatch.home_club
+                      ? <ClubLink club={nextMatch.home_club} className={`match-info-team${nextMatch.home_club_id === clubId ? ' match-info-you' : ''}`} />
+                      : <span className="match-info-team">?</span>}
                     <span className="match-info-vs">vs</span>
-                    <span className={`match-info-team${nextMatch.away_club_id === clubId ? ' match-info-you' : ''}`}>
-                      {nextMatch.away_club?.name ?? '?'}
-                    </span>
+                    {nextMatch.away_club
+                      ? <ClubLink club={nextMatch.away_club} className={`match-info-team${nextMatch.away_club_id === clubId ? ' match-info-you' : ''}`} />
+                      : <span className="match-info-team">?</span>}
                   </div>
                   {nextMatch.scheduled_at && (
                     <p className="match-info-date">

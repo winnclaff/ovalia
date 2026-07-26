@@ -1,79 +1,8 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import Layout from '../components/Layout'
-
-// ─── Timezones ────────────────────────────────────────────────────────────────
-
-const TIMEZONES = [
-  { group: 'France & DOM-TOM', options: [
-    { value: 'Europe/Paris',        label: 'Paris (UTC+1/+2)'           },
-    { value: 'America/Guadeloupe',  label: 'Guadeloupe (UTC−4)'         },
-    { value: 'America/Martinique',  label: 'Martinique (UTC−4)'         },
-    { value: 'America/Cayenne',     label: 'Guyane (UTC−3)'             },
-    { value: 'Indian/Reunion',      label: 'La Réunion (UTC+4)'         },
-    { value: 'Indian/Mayotte',      label: 'Mayotte (UTC+3)'            },
-    { value: 'Pacific/Noumea',      label: 'Nouvelle-Calédonie (UTC+11)'},
-    { value: 'Pacific/Tahiti',      label: 'Polynésie française (UTC−10)'},
-  ]},
-  { group: 'Europe', options: [
-    { value: 'Europe/London',   label: 'Londres (UTC+0/+1)'    },
-    { value: 'Europe/Brussels', label: 'Bruxelles (UTC+1/+2)'  },
-    { value: 'Europe/Geneva',   label: 'Genève (UTC+1/+2)'     },
-    { value: 'Europe/Madrid',   label: 'Madrid (UTC+1/+2)'     },
-    { value: 'Europe/Lisbon',   label: 'Lisbonne (UTC+0/+1)'   },
-    { value: 'Europe/Rome',     label: 'Rome (UTC+1/+2)'       },
-    { value: 'Europe/Dublin',   label: 'Dublin (UTC+0/+1)'     },
-  ]},
-  { group: 'Amériques', options: [
-    { value: 'America/Montreal',    label: 'Montréal (UTC−5/−4)'   },
-    { value: 'America/New_York',    label: 'New York (UTC−5/−4)'   },
-    { value: 'America/Chicago',     label: 'Chicago (UTC−6/−5)'    },
-    { value: 'America/Denver',      label: 'Denver (UTC−7/−6)'     },
-    { value: 'America/Los_Angeles', label: 'Los Angeles (UTC−8/−7)'},
-    { value: 'America/Sao_Paulo',   label: 'São Paulo (UTC−3)'     },
-  ]},
-  { group: 'Afrique & Océan Indien', options: [
-    { value: 'Africa/Casablanca',  label: 'Casablanca (UTC+1)'  },
-    { value: 'Africa/Tunis',       label: 'Tunis (UTC+1)'       },
-    { value: 'Africa/Algiers',     label: 'Alger (UTC+1)'       },
-    { value: 'Africa/Abidjan',     label: 'Abidjan (UTC+0)'     },
-    { value: 'Africa/Dakar',       label: 'Dakar (UTC+0)'       },
-  ]},
-  { group: 'Asie & Pacifique', options: [
-    { value: 'Asia/Tokyo',    label: 'Tokyo (UTC+9)'      },
-    { value: 'Asia/Dubai',    label: 'Dubaï (UTC+4)'      },
-    { value: 'Asia/Beirut',   label: 'Beyrouth (UTC+2/+3)'},
-    { value: 'Australia/Sydney', label: 'Sydney (UTC+10/+11)' },
-  ]},
-]
-
-// ─── Jersey preview (same as CreateClub) ─────────────────────────────────────
-
-function JerseyPreview({ primary, secondary }) {
-  return (
-    <svg viewBox="0 0 100 90" width="100" height="90" aria-hidden="true">
-      <path
-        d="M50,12 L20,18 L4,34 L17,40 L17,80 L50,80 Z"
-        fill={primary}
-        stroke="rgba(0,0,0,0.08)"
-        strokeWidth="0.5"
-      />
-      <path
-        d="M50,12 L80,18 L96,34 L83,40 L83,80 L50,80 Z"
-        fill={secondary}
-        stroke="rgba(0,0,0,0.08)"
-        strokeWidth="0.5"
-      />
-      <path
-        d="M38,13 Q50,24 62,13"
-        fill="none"
-        stroke="rgba(255,255,255,0.6)"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </svg>
-  )
-}
+import { TIMEZONES } from '../lib/timezones'
+import JerseyPreview from '../components/JerseyPreview'
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
@@ -86,6 +15,7 @@ export default function Profil({ session }) {
   const [clubId, setClubId]               = useState(null)
   const [clubName, setClubName]           = useState('')
   const [stadiumName, setStadiumName]     = useState('')
+  const [region, setRegion]               = useState('')
   const [primaryColor, setPrimaryColor]   = useState('#1B7A4A')
   const [secondaryColor, setSecondaryColor] = useState('#F5820D')
 
@@ -119,7 +49,7 @@ export default function Profil({ session }) {
     // Load club
     const { data: club } = await supabase
       .from('clubs')
-      .select('id, name, stadium_name, primary_color, secondary_color')
+      .select('id, name, stadium_name, region, primary_color, secondary_color')
       .eq('owner_user_id', userId)
       .maybeSingle()
 
@@ -127,6 +57,7 @@ export default function Profil({ session }) {
       setClubId(club.id)
       setClubName(club.name ?? '')
       setStadiumName(club.stadium_name ?? '')
+      setRegion(club.region ?? '')
       setPrimaryColor(club.primary_color ?? '#1B7A4A')
       setSecondaryColor(club.secondary_color ?? '#F5820D')
     }
@@ -159,6 +90,7 @@ export default function Profil({ session }) {
           .update({
             name:            clubName.trim(),
             stadium_name:    stadiumName.trim(),
+            region:          region.trim() || null,
             primary_color:   primaryColor,
             secondary_color: secondaryColor,
           })
@@ -278,6 +210,18 @@ export default function Profil({ session }) {
                       className="input profil-input"
                       value={stadiumName}
                       onChange={(e) => setStadiumName(e.target.value)}
+                      maxLength={60}
+                    />
+                  </div>
+
+                  <div className="profil-field">
+                    <label className="profil-label">Région</label>
+                    <input
+                      type="text"
+                      className="input profil-input"
+                      placeholder="Ex : Occitanie"
+                      value={region}
+                      onChange={(e) => setRegion(e.target.value)}
                       maxLength={60}
                     />
                   </div>

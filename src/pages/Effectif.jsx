@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import Layout from '../components/Layout'
+import { CONTRACT_DURATIONS, expectedSalary, acceptanceChance, acceptanceLabel, acceptanceColor } from '../lib/contracts'
 
 // ─── Position metadata ───────────────────────────────────────────────────────
 
@@ -74,6 +75,16 @@ const computeAge = (dateOfBirth) => {
 
 const isInjured = (p) => (p.injury_days_left ?? 0) > 0
 
+const daysUntil = (dateStr) => {
+  if (!dateStr) return null
+  return Math.ceil((new Date(dateStr + 'T00:00:00').getTime() - Date.now()) / 86400_000)
+}
+
+const fmtDate = (d) =>
+  d ? new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
+
+const RENEWAL_WINDOW_DAYS = 60
+
 const fmt = (n) =>
   (n ?? 0).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })
 
@@ -98,13 +109,32 @@ const energyColor = (v) => {
 
 // ─── Player detail modal ─────────────────────────────────────────────────────
 
-function PlayerModal({ player, listing, onClose, onList, onCancelListing, saving }) {
+function PlayerModal({ player, listing, contract, clubBalance, onClose, onList, onCancelListing, onRenew, saving }) {
   const meta = getPositionMeta(player.primary_position)
   const overall = getOverall(player)
   const injured = isInjured(player)
   const energy = player.energy ?? 0
   const age = computeAge(player.date_of_birth)
   const [askingPrice, setAskingPrice] = useState(Math.round((overall * 1000 + 5000) / 500) * 500)
+
+  // ── Renouvellement de contrat ─────────────────────────────────────────────
+  const expected = expectedSalary(overall)
+  const [renewSalary, setRenewSalary]     = useState(expected)
+  const [renewDuration, setRenewDuration] = useState(12)
+  const [renewRejected, setRenewRejected] = useState(false)
+  const daysLeft = contract ? daysUntil(contract.end_date) : null
+  const canRenew = contract && daysLeft != null && daysLeft <= RENEWAL_WINDOW_DAYS
+  const renewChance = acceptanceChance(renewSalary, expected)
+  const canAffordBonus = clubBalance >= renewSalary // prime de signature = 1 mois
+
+  const handleRenewClick = () => {
+    setRenewRejected(false)
+    if (Math.random() < renewChance) {
+      onRenew(player, contract, renewSalary, renewDuration)
+    } else {
+      setRenewRejected(true)
+    }
+  }
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -167,6 +197,69 @@ function PlayerModal({ player, listing, onClose, onList, onCancelListing, saving
           ))}
         </div>
 
+        {/* ── Contrat ── */}
+        {contract && (
+          <div className="contract-section">
+            <div className="contract-info-row">
+              <span className="contract-label">Contrat</span>
+              <span className="contract-value">{fmt(contract.monthly_salary)}/mois</span>
+              <span className={`contract-expiry${daysLeft != null && daysLeft <= RENEWAL_WINDOW_DAYS ? ' contract-expiry-soon' : ''}`}>
+                expire le {fmtDate(contract.end_date)}
+                {daysLeft != null && daysLeft <= RENEWAL_WINDOW_DAYS && ` (${Math.max(0, daysLeft)} j)`}
+              </span>
+            </div>
+
+            {canRenew && (
+              <div className="contract-renew-form">
+                <div className="recr-salary-row">
+                  <input
+                    type="number"
+                    className="recr-input"
+                    value={renewSalary}
+                    min={500}
+                    step={500}
+                    onChange={(e) => { setRenewSalary(Math.max(500, Number(e.target.value))); setRenewRejected(false) }}
+                  />
+                  <span className="recr-currency">€ / mois</span>
+                  <div className="recr-duration-grid" style={{ marginLeft: 'auto' }}>
+                    {CONTRACT_DURATIONS.map((d) => (
+                      <button
+                        key={d}
+                        className={`recr-duration-btn${renewDuration === d ? ' active' : ''}`}
+                        onClick={() => setRenewDuration(d)}
+                      >
+                        {d}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="recr-acceptance-row">
+                  <div className="recr-acceptance-bar-track">
+                    <div className="recr-acceptance-bar-fill" style={{ width: `${renewChance * 100}%`, background: acceptanceColor(renewChance) }} />
+                  </div>
+                  <span className="recr-acceptance-label" style={{ color: acceptanceColor(renewChance) }}>
+                    {acceptanceLabel(renewChance)} ({Math.round(renewChance * 100)}%)
+                  </span>
+                </div>
+                <div className="contract-renew-footer">
+                  <span className="infra-cost-sub">Prime de signature : {fmt(renewSalary)} (1 mois)</span>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleRenewClick}
+                    disabled={saving || renewChance === 0 || !canAffordBonus}
+                  >
+                    {saving ? '…' : 'Renouveler'}
+                  </button>
+                </div>
+                {!canAffordBonus && <p className="recr-error">Trésorerie insuffisante pour la prime de signature.</p>}
+                {renewRejected && (
+                  <p className="recr-error">{playerName(player)} refuse cette offre. Proposez un salaire plus élevé.</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="sell-section">
           {listing ? (
             <>
@@ -210,8 +303,10 @@ const FILTERS = [
 export default function Effectif({ session }) {
   const navigate = useNavigate()
   const [clubId, setClubId] = useState(null)
+  const [clubBalance, setClubBalance] = useState(0)
   const [players, setPlayers] = useState([])
   const [listings, setListings] = useState({})
+  const [contracts, setContracts] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('all')
@@ -223,7 +318,7 @@ export default function Effectif({ session }) {
   const loadPlayers = async () => {
     const { data: club, error: clubError } = await supabase
       .from('clubs')
-      .select('id')
+      .select('id, balance')
       .eq('owner_user_id', session.user.id)
       .single()
 
@@ -232,15 +327,18 @@ export default function Effectif({ session }) {
       return
     }
     setClubId(club.id)
+    setClubBalance(club.balance ?? 0)
 
-    const [{ data, error: err }, { data: listingRows }] = await Promise.all([
+    const [{ data, error: err }, { data: listingRows }, { data: contractRows }] = await Promise.all([
       supabase.from('players').select('*').eq('club_id', club.id),
       supabase.from('transfer_listings').select('id, player_id, asking_price').eq('club_id', club.id).eq('status', 'active'),
+      supabase.from('contracts').select('id, player_id, monthly_salary, end_date').eq('club_id', club.id).eq('is_active', true),
     ])
 
     if (err) setError('Impossible de charger les joueurs.')
     else setPlayers(data ?? [])
     setListings(Object.fromEntries((listingRows ?? []).map((l) => [l.player_id, l])))
+    setContracts(Object.fromEntries((contractRows ?? []).map((c) => [c.player_id, c])))
     setLoading(false)
   }
 
@@ -265,6 +363,57 @@ export default function Effectif({ session }) {
       delete next[listing.player_id]
       return next
     })
+    setSaving(false)
+  }
+
+  // ── Renouvellement de contrat ───────────────────────────────────────────────
+  // Le tirage d'acceptation a déjà eu lieu dans la modale ; ici on exécute :
+  // ancien contrat désactivé, nouveau contrat depuis aujourd'hui, prime de
+  // signature (1 mois) déduite.
+  const handleRenew = async (player, contract, salary, duration) => {
+    setSaving(true)
+
+    const startDate = new Date()
+    const endDate = new Date(startDate)
+    endDate.setMonth(endDate.getMonth() + duration)
+
+    const { error: newErr } = await supabase.from('contracts').insert({
+      player_id:      player.id,
+      club_id:        clubId,
+      monthly_salary: salary,
+      start_date:     startDate.toISOString().slice(0, 10),
+      end_date:       endDate.toISOString().slice(0, 10),
+      is_active:      true,
+    })
+
+    if (newErr) {
+      setSaving(false)
+      alert(`Erreur lors du renouvellement : ${newErr.message}`)
+      return
+    }
+
+    await supabase.from('contracts').update({ is_active: false }).eq('id', contract.id)
+
+    const newBalance = clubBalance - salary
+    await supabase.from('clubs').update({ balance: newBalance }).eq('id', clubId)
+    await supabase.from('transactions').insert({
+      club_id:     clubId,
+      type:        'salary',
+      amount:      salary,
+      description: `Renouvellement ${playerName(player)} — prime de signature`,
+    })
+
+    setClubBalance(newBalance)
+    setContracts((prev) => ({
+      ...prev,
+      [player.id]: {
+        id: null, // rechargé au prochain loadPlayers ; suffisant pour l'affichage
+        player_id: player.id,
+        monthly_salary: salary,
+        end_date: endDate.toISOString().slice(0, 10),
+      },
+    }))
+    setSelected(null)
     setSaving(false)
   }
 
@@ -310,6 +459,7 @@ export default function Effectif({ session }) {
                   <th>Nom</th>
                   <th>Âge</th>
                   <th>Gabarit</th>
+                  <th>Contrat</th>
                   <th>Énergie</th>
                   <th>Statut</th>
                   <th>Note</th>
@@ -318,7 +468,7 @@ export default function Effectif({ session }) {
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: 40, color: '#aaa' }}>
+                    <td colSpan={8} style={{ textAlign: 'center', padding: 40, color: '#aaa' }}>
                       Aucun joueur
                     </td>
                   </tr>
@@ -344,6 +494,19 @@ export default function Effectif({ session }) {
                         <td className="player-age-cell">{age != null ? `${age} ans` : '—'}</td>
                         <td className="player-build-cell">
                           {player.height_cm ? `${player.height_cm} cm` : '—'} · {player.weight_kg ? `${player.weight_kg} kg` : '—'}
+                        </td>
+                        <td className="player-contract-cell">
+                          {(() => {
+                            const c = contracts[player.id]
+                            if (!c) return <span style={{ color: '#ccc' }}>—</span>
+                            const dl = daysUntil(c.end_date)
+                            const soon = dl != null && dl <= RENEWAL_WINDOW_DAYS
+                            return (
+                              <span style={soon ? { color: '#e74c3c', fontWeight: 600 } : {}}>
+                                {fmtDate(c.end_date)}
+                              </span>
+                            )
+                          })()}
                         </td>
                         <td>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -379,9 +542,12 @@ export default function Effectif({ session }) {
           <PlayerModal
             player={selected}
             listing={listings[selected.id] ?? null}
+            contract={contracts[selected.id] ?? null}
+            clubBalance={clubBalance}
             onClose={() => setSelected(null)}
             onList={handleList}
             onCancelListing={handleCancelListing}
+            onRenew={handleRenew}
             saving={saving}
           />
         )}

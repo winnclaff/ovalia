@@ -43,11 +43,47 @@ interface MatchEvent {
   description: string
 }
 
+interface PlayerMatchStat {
+  player_id: string
+  club_id: string
+  position: string | null
+  is_starter: boolean
+  minutes_played: number
+  tries: number
+  conversions: number
+  penalties: number
+  points: number
+  carries: number
+  meters_gained: number
+  tackles: number
+  tackles_missed: number
+  turnovers_won: number
+  handling_errors: number
+  yellow_cards: number
+  red_cards: number
+  rating: number
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const rand    = (min: number, max: number) => Math.random() * (max - min) + min
 const randInt = (min: number, max: number) => Math.floor(rand(min, max + 1))
 const pick    = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+
+// Tirage pondéré : la probabilité d'être choisi est proportionnelle au poids.
+// Indispensable pour que les statistiques individuelles aient un sens — avec un
+// simple pick() aléatoire, le meilleur ailier marquait autant que le pire, et
+// aucune décision de composition n'aurait pu s'appuyer sur les chiffres.
+const weightedPick = <T>(arr: T[], weight: (item: T) => number): T => {
+  const weights = arr.map((it) => Math.max(0.01, weight(it)))
+  const total   = weights.reduce((a, b) => a + b, 0)
+  let r = Math.random() * total
+  for (let i = 0; i < arr.length; i++) {
+    r -= weights[i]
+    if (r <= 0) return arr[i]
+  }
+  return arr[arr.length - 1]
+}
 const avg     = (vals: number[]) => vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 50
 const clamp   = (v: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v))
 
@@ -196,13 +232,42 @@ function simulateMatch(
   const usedMinutes = new Set<number>()
   const nextMinute = (approx: number) => {
     let m = Math.min(79, Math.max(1, approx + randInt(-1, 1)))
-    while (usedMinutes.has(m)) m = (m + 1) % 80
+    // ⚠️ Garde-fou obligatoire : un match génère 55-85 phases (+ transformations,
+    // cartons, blessures), soit potentiellement plus d'appels que de minutes
+    // disponibles. Sans borne, dès que les 79 minutes sont prises la boucle
+    // tourne à l'infini et le worker Edge est tué (WORKER_RESOURCE_LIMIT) —
+    // le match n'est alors jamais simulé.
+    for (let guard = 0; guard < 80 && usedMinutes.has(m); guard++) {
+      m = m >= 79 ? 1 : m + 1
+    }
     usedMinutes.add(m)
     return m
   }
 
   const homePlayers = home.players
   const awayPlayers = away.players
+
+  // ── Statistiques individuelles ────────────────────────────────────────────
+  const statsById: Record<string, PlayerMatchStat> = {}
+  const initStat = (p: Player, clubId: string) => {
+    statsById[p.id] = {
+      player_id: p.id, club_id: clubId,
+      position: normalPos(p.primary_position).toLowerCase() || null,
+      is_starter: true, minutes_played: 80,
+      tries: 0, conversions: 0, penalties: 0, points: 0,
+      carries: 0, meters_gained: 0, tackles: 0, tackles_missed: 0,
+      turnovers_won: 0, handling_errors: 0, yellow_cards: 0, red_cards: 0,
+      rating: 6,
+    }
+  }
+  homePlayers.forEach((p) => initStat(p, home.clubId))
+  awayPlayers.forEach((p) => initStat(p, away.clubId))
+
+  const bump = (playerId: string | null, field: keyof PlayerMatchStat, n = 1) => {
+    if (!playerId) return
+    const st = statsById[playerId]
+    if (st) (st[field] as number) += n
+  }
 
   for (let i = 0; i < phases; i++) {
     const approxMin = Math.round((i / phases) * 78) + 1
@@ -222,10 +287,18 @@ function simulateMatch(
     if (phaseType === 'open') {
       const attackVal = teamScore.attack * rand(0.8, 1.2)
       const defVal    = oppScore.defense * rand(0.8, 1.2)
-      if (attackVal > defVal * 0.85) {
-        // ✅ primary_position pour le ouvreur
-        const scorer = pick(players.filter(isBack).length ? players.filter(isBack) : players)
+      // ⚠️ Un essai doit rester rare. Historique du calibrage, mesuré sur des
+      // matchs réels : seuil 0.85 sans tirage → 30 essais/match (scores 200+) ;
+      // seuil 1.05 + tirage 0.5 → 17 essais/match (scores ~60) ; seuil 1.05 +
+      // tirage 0.25 → ~8 essais/match, soit 4 par équipe et des scores de
+      // 25-35 points, la fourchette réaliste du rugby.
+      if (attackVal > defVal * 1.05 && Math.random() < 0.25) {
+        // Marqueur pondéré : percussion, vitesse et agilité décident, pas le hasard
+        const backs  = players.filter(isBack)
+        const scorer = weightedPick(backs.length ? backs : players,
+          (p) => p.breaking + p.speed + p.agility)
         homeHasBall ? homeScore += 5 : awayScore += 5
+        bump(scorer.id, 'tries'); bump(scorer.id, 'points', 5)
         addEvent(minute, 'try', club, scorer.id,
           pick(tryDescriptions(homeHasBall ? 'domicile' : 'extérieur', scorer.id.slice(-4))),
           homeScore, awayScore)
@@ -234,6 +307,7 @@ function simulateMatch(
         const kickChance = clamp(kicker.kicking / 100 * 0.9 + 0.2, 0.2, 0.95)
         if (Math.random() < kickChance) {
           homeHasBall ? homeScore += 2 : awayScore += 2
+          bump(kicker.id, 'conversions'); bump(kicker.id, 'points', 2)
           const m2 = nextMinute(minute + 1)
           addEvent(m2, 'conversion', club, kicker.id, 'Transformation réussie.', homeScore, awayScore)
         }
@@ -247,7 +321,9 @@ function simulateMatch(
       const oppScrum = oppScore.scrum * rand(0.8, 1.2)
       if (scrumVal > oppScrum * 1.15 && Math.random() < 0.5) {
         homeHasBall ? homeScore += 3 : awayScore += 3
-        addEvent(minute, 'penalty_goal', club, null,
+        const kicker = players.find((p) => normalPos(p.primary_position) === 'FLY_HALF') ?? pick(players)
+        bump(kicker.id, 'penalties'); bump(kicker.id, 'points', 3)
+        addEvent(minute, 'penalty_kick', club, kicker.id,
           pick(penaltyDescriptions(homeHasBall ? 'domicile' : 'extérieur')), homeScore, awayScore)
       }
     }
@@ -257,14 +333,20 @@ function simulateMatch(
       const oppLineout = oppScore.lineout * rand(0.8, 1.2)
       if (lineoutVal > oppLineout && Math.random() < 0.3 && Math.random() < 0.35) {
         homeHasBall ? homeScore += 5 : awayScore += 5
-        const scorer = pick(players.filter(isForward).length ? players.filter(isForward) : players)
+        // Essai de pack : la touche et la puissance priment
+        const fwds   = players.filter(isForward)
+        const scorer = weightedPick(fwds.length ? fwds : players,
+          (p) => p.strength + p.rucking + p.lineout)
+        bump(scorer.id, 'tries'); bump(scorer.id, 'points', 5)
         addEvent(minute, 'try', club, scorer.id,
           `Essai après maul sur touche pour ${homeHasBall ? 'l\'équipe à domicile' : 'les visiteurs'} !`,
           homeScore, awayScore)
         if (Math.random() < 0.7) {
           homeHasBall ? homeScore += 2 : awayScore += 2
+          const kicker = players.find((p) => normalPos(p.primary_position) === 'FLY_HALF') ?? pick(players)
+          bump(kicker.id, 'conversions'); bump(kicker.id, 'points', 2)
           const m2 = nextMinute(minute + 1)
-          addEvent(m2, 'conversion', club, null, 'Transformation réussie.', homeScore, awayScore)
+          addEvent(m2, 'conversion', club, kicker.id, 'Transformation réussie.', homeScore, awayScore)
         }
       }
     }
@@ -279,25 +361,36 @@ function simulateMatch(
         const kickChance = clamp(kicker.kicking / 100 * 0.85 + 0.1, 0.2, 0.95)
         if (Math.random() < kickChance) {
           homeHasBall ? awayScore += 3 : homeScore += 3
-          addEvent(minute, 'penalty_goal', beneficiary.clubId, kicker.id,
+          bump(kicker.id, 'penalties'); bump(kicker.id, 'points', 3)
+          addEvent(minute, 'penalty_kick', beneficiary.clubId, kicker.id,
             pick(penaltyDescriptions(!homeHasBall ? 'domicile' : 'extérieur')), homeScore, awayScore)
         }
+        // Cartons : les joueurs indisciplinés sont bien plus souvent sanctionnés
         if (Math.random() < 0.08) {
-          const culprit = pick(players)
+          const culprit = weightedPick(players, (p) => 110 - p.discipline)
+          bump(culprit.id, 'yellow_cards')
           addEvent(nextMinute(minute + 1), 'yellow_card', club, culprit.id,
             CARD_YELLOW_DESC(homeHasBall ? 'domicile' : 'extérieur', culprit.id.slice(-4)), homeScore, awayScore)
         }
         if (Math.random() < 0.015) {
-          const culprit = pick(players)
-          addEvent(nextMinute(minute + 1), 'red_card', club, culprit.id,
+          const culprit = weightedPick(players, (p) => 110 - p.discipline)
+          const m = nextMinute(minute + 1)
+          bump(culprit.id, 'red_cards')
+          const st = statsById[culprit.id]
+          if (st) st.minutes_played = m   // exclu définitivement
+          addEvent(m, 'red_card', club, culprit.id,
             CARD_RED_DESC(homeHasBall ? 'domicile' : 'extérieur', culprit.id.slice(-4)), homeScore, awayScore)
         }
       }
     }
 
     if (Math.random() < (isFriendly ? 0.008 : 0.015)) {
-      const injured = pick(players)
-      addEvent(nextMinute(approxMin), 'injury', club, injured.id,
+      // Les joueurs les moins endurants se blessent plus souvent
+      const injured = weightedPick(players, (p) => 110 - p.endurance)
+      const m = nextMinute(approxMin)
+      const st = statsById[injured.id]
+      if (st) st.minutes_played = Math.min(st.minutes_played, m)
+      addEvent(m, 'injury', club, injured.id,
         INJURY_DESC(homeHasBall ? 'domicile' : 'extérieur', injured.id.slice(-4)), homeScore, awayScore)
     }
   }
@@ -310,6 +403,7 @@ function simulateMatch(
     if (kicker && clamp(kicker.kicking * rand(0.8, 1.2), 1, 100) > 55) {
       const minute = nextMinute(randInt(20, 75))
       isHomeKick ? homeScore += 3 : awayScore += 3
+      bump(kicker.id, 'penalties'); bump(kicker.id, 'points', 3)
       addEvent(minute, 'drop_goal', dropClub, kicker.id,
         `Drop réussi ! ${isHomeKick ? 'L\'équipe à domicile' : 'Les visiteurs'} marquent 3 points.`,
         homeScore, awayScore)
@@ -324,7 +418,56 @@ function simulateMatch(
     description: `Coup de sifflet final. Score : ${homeScore} – ${awayScore}.`,
   })
 
-  return { homeScore, awayScore, events }
+  // ── Jeu courant : volumes dérivés du poste et des caractéristiques ─────────
+  // Les essais/cartons viennent des événements ci-dessus ; ici on modélise le
+  // travail de l'ombre (plaquages, courses, mètres) qui ne génère pas
+  // d'événement mais distingue un bon joueur d'un mauvais sur la durée.
+  for (const p of [...homePlayers, ...awayPlayers]) {
+    const st = statsById[p.id]
+    if (!st) continue
+    const fwd       = isForward(p)
+    const minFactor = clamp(st.minutes_played / 80, 0.1, 1)
+
+    const tackleBase = (fwd ? 9 : 5) * (0.6 + p.tackling / 100)
+    st.tackles = Math.max(0, Math.round(tackleBase * minFactor * rand(0.6, 1.4)))
+    const missRate = clamp(0.28 - p.tackling / 500, 0.04, 0.3)
+    st.tackles_missed = Math.round(st.tackles * missRate * rand(0.4, 1.6))
+
+    const carryBase = (fwd ? 8 : 6) * (0.6 + p.breaking / 100)
+    st.carries = Math.max(0, Math.round(carryBase * minFactor * rand(0.6, 1.4)))
+    const metersPerCarry = (fwd ? 2.5 : 5.5) * (0.5 + (p.speed + p.breaking) / 200)
+    st.meters_gained = Math.round(st.carries * metersPerCarry * rand(0.7, 1.3))
+
+    if (Math.random() < (p.rucking / 260) * minFactor) st.turnovers_won = randInt(1, 2)
+    const errorRate = clamp(0.5 - (p.passing + p.composure) / 400, 0.05, 0.5)
+    if (Math.random() < errorRate * minFactor) st.handling_errors = randInt(1, 2)
+  }
+
+  // ── Note sur 10 ────────────────────────────────────────────────────────────
+  const homeWon = homeScore > awayScore
+  const awayWon = awayScore > homeScore
+  for (const p of [...homePlayers, ...awayPlayers]) {
+    const st = statsById[p.id]
+    if (!st) continue
+    const isHomeSide = st.club_id === home.clubId
+    let r = 6
+    r += st.tries * 1.1
+    r += st.conversions * 0.15
+    r += st.penalties * 0.3
+    r += st.tackles * 0.06
+    r -= st.tackles_missed * 0.12
+    r += st.meters_gained * 0.012
+    r += st.turnovers_won * 0.4
+    r -= st.handling_errors * 0.35
+    r -= st.yellow_cards * 0.8
+    r -= st.red_cards * 2.5
+    // Le résultat collectif pèse un peu sur la note individuelle
+    if (isHomeSide ? homeWon : awayWon) r += 0.3
+    else if (isHomeSide ? awayWon : homeWon) r -= 0.2
+    st.rating = Math.round(clamp(r, 1, 10) * 10) / 10
+  }
+
+  return { homeScore, awayScore, events, playerStats: Object.values(statsById) }
 }
 
 // ─── Calcul des standings ─────────────────────────────────────────────────────
@@ -455,12 +598,47 @@ serve(async (req) => {
       isHome: false, isBot: awayClub.is_bot ?? false, perfPenalty: awayClub.performance_penalty ?? 8,
     }
 
-    const { homeScore, awayScore, events } = simulateMatch(
+    const { homeScore, awayScore, events, playerStats } = simulateMatch(
       match_id, homeTeam, awayTeam, match.scheduled_at, isFriendly,
     )
 
     const eventRows = events.map((e) => ({ ...e, match_id }))
-    await supabase.from('match_events').insert(eventRows)
+    const { error: evErr } = await supabase.from('match_events').insert(eventRows)
+    // ⚠️ Sans ce contrôle, un enum invalide faisait échouer tout le lot en
+    // silence et match_events restait vide — bug resté invisible des mois.
+    if (evErr) console.error('match_events insert failed:', evErr.message)
+
+    // Compos réellement alignées : si le club n'avait pas validé de compo, la
+    // sélection automatique est persistée pour que le match reste consultable.
+    const lineupsToPersist = [
+      { clubId: match.home_club_id, players: finalHomePlayers, had: homeLineup.length > 0 },
+      { clubId: match.away_club_id, players: finalAwayPlayers, had: awayLineup.length > 0 },
+    ].filter((l) => !l.had)
+
+    for (const l of lineupsToPersist) {
+      const rows = l.players.map((p, i) => ({
+        match_id, club_id: l.clubId, player_id: p.id,
+        shirt_number: i + 1, is_starter: true,
+        position: normalPos(p.primary_position).toLowerCase(),
+      }))
+      if (rows.length) {
+        const { error: luErr } = await supabase.from('match_lineups').insert(rows)
+        if (luErr) console.error('match_lineups insert failed:', luErr.message)
+      }
+    }
+
+    // Statistiques individuelles du match
+    const { error: psErr } = await supabase
+      .from('match_player_stats')
+      .upsert(playerStats.map((s) => ({ ...s, match_id })), { onConflict: 'match_id,player_id' })
+    if (psErr) console.error('match_player_stats insert failed:', psErr.message)
+
+    // Blessures réelles : chaque événement 'injury' immobilise le joueur.
+    // La guérison (accélérée par kiné + centre médical) est gérée par nightly-tick.
+    for (const ev of events.filter((e) => e.event_type === 'injury' && e.player_id)) {
+      const days = isFriendly ? randInt(2, 6) : randInt(3, 12)
+      await supabase.from('players').update({ injury_days_left: days }).eq('id', ev.player_id)
+    }
 
     const homeTries = events.filter((e) => e.event_type === 'try' && e.club_id === match.home_club_id).length
     const awayTries = events.filter((e) => e.event_type === 'try' && e.club_id === match.away_club_id).length
@@ -517,7 +695,8 @@ serve(async (req) => {
       const capacity        = 3000 + (homeClub.stadium_level ?? 1) * 1500
       const attendanceRate  = clamp(0.45 + (homeClub.reputation ?? 50) / 250 + rand(-0.05, 0.05), 0.35, 0.95)
       const rateMultiplier  = isFriendly ? 0.3 : 1
-      const ticketRevenue   = Math.round(capacity * attendanceRate * 15 * rateMultiplier)
+      // 12 €/place : à 15 € la billetterie dominait tous les autres revenus réunis
+      const ticketRevenue   = Math.round(capacity * attendanceRate * 12 * rateMultiplier)
 
       if (ticketRevenue > 0) {
         // ✅ 'ticket_revenue' (pas 'ticket') : seule valeur valide de l'enum transaction_type

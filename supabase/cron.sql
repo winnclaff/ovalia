@@ -5,7 +5,7 @@
 --   ce fichier (ne jamais committer cette clé en clair) :
 --
 --   select vault.create_secret(
---     '<TA_CLE_SERVICE_ROLE>',
+--     'eyJ...',   -- ⚠️ REMPLACER par la vraie clé, pas ce texte d'exemple !
 --     'service_role_key',
 --     'Clé utilisée par les cron jobs pour appeler les Edge Functions'
 --   );
@@ -13,6 +13,26 @@
 -- Exécute ça une seule fois dans le SQL Editor, avec ta vraie clé (Settings →
 -- API → service_role secret). Les jobs ci-dessous la relisent depuis
 -- vault.decrypted_secrets à chaque exécution — elle n'apparaît jamais ici.
+--
+-- ⚠️ VÉRIFIER que la clé est correctement enregistrée (sinon les cron jobs
+-- échouent silencieusement en 401 et plus rien ne se simule) :
+--
+--   select length(decrypted_secret) as len,
+--          length(decrypted_secret) - length(replace(decrypted_secret,'.','')) as dots,
+--          left(decrypted_secret, 3) as prefix
+--   from vault.decrypted_secrets where name = 'service_role_key';
+--
+-- Attendu : len > 200, dots = 2, prefix = 'eyJ'. Toute autre valeur = mauvaise clé.
+--
+-- Pour corriger une clé déjà enregistrée :
+--   select vault.update_secret(
+--     (select id from vault.secrets where name = 'service_role_key'),
+--     'eyJ...'   -- la vraie clé
+--   );
+--
+-- Diagnostic si les matchs ne se simulent pas :
+--   select status_code, content, created from net._http_response
+--   order by created desc limit 5;
 -- =============================================================================
 
 -- ─── Activer l'extension pg_cron ──────────────────────────────────────────────

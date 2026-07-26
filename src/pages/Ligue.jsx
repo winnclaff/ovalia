@@ -1,8 +1,9 @@
 // Page Ligue — classement + calendrier
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import Layout from '../components/Layout'
+import ClubLink from '../components/ClubLink'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -53,8 +54,7 @@ function StandingsTable({ standings, userClubId }) {
               <tr key={s.id ?? s.club_id} className={`league-row${isUser ? ' league-row-user' : ''}`}>
                 <td className="league-rank">{i + 1}</td>
                 <td className="league-club-name">
-                  {s.clubs?.name ?? s.club_name ?? '—'}
-                  {s.clubs?.is_bot && <span className="bot-badge">(bot)</span>}
+                  {s.clubs ? <ClubLink club={s.clubs} /> : (s.club_name ?? '—')}
                   {isUser && <span className="you-badge">vous</span>}
                 </td>
                 <td>{s.played    ?? '—'}</td>
@@ -122,23 +122,21 @@ function ScheduleView({ matches, clubsById, userClubId, currentRound }) {
                   return (
                     <div key={m.id} className={`match-row${userMatch ? ' match-row-user' : ''}`}>
                       <span className={`match-team home${m.home_club_id === userClubId ? ' match-you' : ''}`}>
-                        {home?.name ?? '—'}
-                        {home?.is_bot && <span className="bot-badge">(bot)</span>}
+                        {home ? <ClubLink club={home} /> : '—'}
                       </span>
 
                       <span className="match-score-cell">
                         {played ? (
-                          <span className="match-score">
+                          <Link to={`/match/${m.id}`} className="match-score match-score-link" title="Voir le détail du match">
                             {m.home_score} <span className="score-sep">–</span> {m.away_score}
-                          </span>
+                          </Link>
                         ) : (
                           <span className="match-vs">vs</span>
                         )}
                       </span>
 
                       <span className={`match-team away${m.away_club_id === userClubId ? ' match-you' : ''}`}>
-                        {away?.name ?? '—'}
-                        {away?.is_bot && <span className="bot-badge">(bot)</span>}
+                        {away ? <ClubLink club={away} /> : '—'}
                       </span>
 
                       {userMatch && result && (

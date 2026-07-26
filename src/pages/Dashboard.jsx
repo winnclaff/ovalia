@@ -1,13 +1,21 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import Layout from '../components/Layout'
+import ClubLink from '../components/ClubLink'
 
 const fmt = (d) =>
   new Date(d).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 
 const fmtDate = (d) =>
   new Date(d).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' })
+
+const OBJECTIVE_META = {
+  win_title:        { label: 'Remporter le championnat',          okRank: (r) => r === 1 },
+  top3:             { label: 'Finir sur le podium',               okRank: (r) => r != null && r <= 3 },
+  top_half:         { label: 'Finir dans la première moitié',     okRank: (r) => r != null && r <= 4 },
+  avoid_relegation: { label: 'Éviter la relégation',              okRank: (r, total) => r != null && r < (total ?? 8) },
+}
 
 export default function Dashboard({ session }) {
   const navigate = useNavigate()
@@ -17,6 +25,8 @@ export default function Dashboard({ session }) {
   const [standing, setStanding]       = useState(null)
   const [alerts, setAlerts]           = useState([])
   const [allClubs, setAllClubs]       = useState({})
+  const [nightReport, setNightReport] = useState(null)
+  const [objective, setObjective]     = useState(null)
   const [loading, setLoading]         = useState(true)
 
   const handleLogout = async () => { await supabase.auth.signOut() }
@@ -44,6 +54,7 @@ export default function Dashboard({ session }) {
       { data: activeSeason },
       { data: players },
       { data: expiringContracts },
+      { data: reportRow },
     ] = await Promise.all([
       supabase
         .from('matches')
@@ -63,7 +74,7 @@ export default function Dashboard({ session }) {
 
       supabase
         .from('clubs')
-        .select('id, name'),
+        .select('id, name, is_bot'),
 
       supabase
         .from('league_seasons')
@@ -85,12 +96,23 @@ export default function Dashboard({ session }) {
         .eq('club_id', clubId)
         .eq('is_active', true)
         .lt('end_date', new Date(Date.now() + 30 * 86400_000).toISOString().slice(0, 10)),
+
+      supabase
+        .from('daily_reports')
+        .select('report_date, payload')
+        .eq('club_id', clubId)
+        .order('report_date', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
     ])
 
     // ── Clubs map
     const clubMap = {}
     ;(clubsData ?? []).forEach((c) => { clubMap[c.id] = c })
     setAllClubs(clubMap)
+
+    // ── Rapport de la nuit
+    setNightReport(reportRow ?? null)
 
     // ── Prochain match
     const nm = nextMatches?.[0] ?? null
@@ -101,6 +123,14 @@ export default function Dashboard({ session }) {
 
     // ── Classement
     if (activeSeason?.id) {
+      const { data: objRow } = await supabase
+        .from('season_objectives')
+        .select('objective_type, reward, status')
+        .eq('league_season_id', activeSeason.id)
+        .eq('club_id', clubId)
+        .maybeSingle()
+      setObjective(objRow ?? null)
+
       const { data: standingRow } = await supabase
         .from('standings')
         .select('played, won, drawn, lost, ranking_points')
@@ -173,9 +203,9 @@ export default function Dashboard({ session }) {
     const conceded = isHome ? lastMatch.away_score : lastMatch.home_score
     const oppId    = isHome ? lastMatch.away_club_id : lastMatch.home_club_id
     const oppName  = allClubs[oppId]?.name ?? '—'
-    if (scored > conceded)       lastResult = { label: 'Victoire', cls: 'result-w', scored, conceded, oppName }
-    else if (scored < conceded)  lastResult = { label: 'Défaite',  cls: 'result-l', scored, conceded, oppName }
-    else                         lastResult = { label: 'Nul',      cls: 'result-d', scored, conceded, oppName }
+    if (scored > conceded)       lastResult = { label: 'Victoire', cls: 'result-w', scored, conceded, oppName, oppId }
+    else if (scored < conceded)  lastResult = { label: 'Défaite',  cls: 'result-l', scored, conceded, oppName, oppId }
+    else                         lastResult = { label: 'Nul',      cls: 'result-d', scored, conceded, oppName, oppId }
   }
 
   // ── Adversaire prochain match
@@ -230,6 +260,50 @@ export default function Dashboard({ session }) {
           </div>
         </div>
 
+        {/* ── Cette nuit au club ── */}
+        {nightReport?.payload && (() => {
+          const p = nightReport.payload
+          const hasNews = (p.training?.totalGain ?? 0) > 0 || p.recovered?.length || p.academy?.length
+            || p.market?.length || p.financesNet != null
+          const dateLabel = new Date(nightReport.report_date + 'T00:00:00')
+            .toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })
+          return (
+            <div className="card dash-night-report">
+              <p className="dash-card-title">🌙 Cette nuit au club <span className="dash-night-date">— {dateLabel}</span></p>
+              {!hasNews ? (
+                <p className="dash-empty">Nuit calme, rien à signaler.</p>
+              ) : (
+                <ul className="dash-night-list">
+                  {(p.training?.totalGain ?? 0) > 0 && (
+                    <li>
+                      💪 <strong>+{p.training.totalGain.toLocaleString('fr-FR')} pts</strong> de progression à l'entraînement
+                      {p.training.top?.length > 0 && (
+                        <span className="dash-night-detail">
+                          {' '}(meilleurs : {p.training.top.map((t) => `${t.name} +${t.gain}`).join(', ')})
+                        </span>
+                      )}
+                    </li>
+                  )}
+                  {p.recovered?.length > 0 && (
+                    <li>🩹 De retour de blessure : <strong>{p.recovered.join(', ')}</strong></li>
+                  )}
+                  {p.academy?.length > 0 && (
+                    <li>🎓 Nouveaux talents à l'académie : <strong>{p.academy.join(', ')}</strong></li>
+                  )}
+                  {p.market?.length > 0 && (
+                    <li>🔍 À suivre sur le marché : {p.market.join(', ')}</li>
+                  )}
+                  {p.financesNet != null && (
+                    <li style={{ color: p.financesNet >= 0 ? '#1B7A4A' : '#e74c3c' }}>
+                      💰 Bilan financier mensuel : <strong>{p.financesNet >= 0 ? '+' : ''}{p.financesNet.toLocaleString('fr-FR')} €</strong>
+                    </li>
+                  )}
+                </ul>
+              )}
+            </div>
+          )
+        })()}
+
         {/* ── Grille infos ── */}
         <div className="dash-grid">
 
@@ -238,7 +312,9 @@ export default function Dashboard({ session }) {
             <p className="dash-card-title">Prochain match</p>
             {nextMatch ? (
               <>
-                <p className="dash-opponent">{nextOppName}</p>
+                <p className="dash-opponent">
+                  {nextOppId && allClubs[nextOppId] ? <ClubLink club={allClubs[nextOppId]} /> : nextOppName}
+                </p>
                 <p className="dash-match-date">{fmt(nextMatch.scheduled_at)}</p>
                 {nextMatch.lineup_deadline && (
                   <p className={`dash-deadline${isDeadlineSoon ? ' dash-deadline-urgent' : ''}`}>
@@ -257,13 +333,39 @@ export default function Dashboard({ session }) {
             {lastResult ? (
               <>
                 <p className={`dash-result-label ${lastResult.cls}`}>{lastResult.label}</p>
-                <p className="dash-score">{lastResult.scored} – {lastResult.conceded}</p>
-                <p className="dash-opponent" style={{ fontSize: 13 }}>vs {lastResult.oppName}</p>
+                <Link to={`/match/${lastMatch.id}`} className="dash-score dash-score-link" title="Voir le détail du match">
+                  {lastResult.scored} – {lastResult.conceded}
+                </Link>
+                <p className="dash-opponent" style={{ fontSize: 13 }}>
+                  vs {lastResult.oppId && allClubs[lastResult.oppId] ? <ClubLink club={allClubs[lastResult.oppId]} /> : lastResult.oppName}
+                </p>
               </>
             ) : (
               <p className="dash-empty">Aucun match joué</p>
             )}
           </div>
+
+          {/* Objectif de saison */}
+          {objective && OBJECTIVE_META[objective.objective_type] && (() => {
+            const meta = OBJECTIVE_META[objective.objective_type]
+            const onTrack = standing ? meta.okRank(standing.rank, standing.total) : true
+            const stateLabel = objective.status === 'achieved' ? '✓ Atteint'
+              : objective.status === 'failed' ? '✗ Manqué'
+              : onTrack ? 'En bonne voie' : 'En difficulté'
+            const stateColor = objective.status === 'achieved' ? '#1B7A4A'
+              : objective.status === 'failed' ? '#e74c3c'
+              : onTrack ? '#1B7A4A' : '#F5820D'
+            return (
+              <div className="card dash-card">
+                <p className="dash-card-title">🎯 Objectif de saison</p>
+                <p className="dash-objective-label">{meta.label}</p>
+                <p className="dash-objective-reward">
+                  Prime : {(objective.reward ?? 0).toLocaleString('fr-FR')} €
+                </p>
+                <p className="dash-objective-state" style={{ color: stateColor }}>{stateLabel}</p>
+              </div>
+            )
+          })()}
 
           {/* Classement */}
           <div className="card dash-card">

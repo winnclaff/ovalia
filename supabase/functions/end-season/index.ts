@@ -63,12 +63,13 @@ serve(async (req) => {
       const prize  = PRIZE_MONEY[i] ?? 50_000
       const clubId = standings[i].club_id
 
-      await supabase.from('transactions').insert({
+      const { error: prizeErr } = await supabase.from('transactions').insert({
         club_id:     clubId,
         type:        'prize',
         amount:      prize,
         description: `Prime de classement — ${i + 1}e place — ${league.name}`,
       })
+      if (prizeErr) log.push(`Prime: erreur insert club ${clubId} — ${prizeErr.message}`)
 
       const { data: clubRow } = await supabase.from('clubs').select('balance').eq('id', clubId).single()
       if (clubRow) {
@@ -76,6 +77,52 @@ serve(async (req) => {
       }
     }
     log.push('Primes versées ✓')
+
+    // ── 3bis. Objectifs de saison : évaluation ────────────────────────────────
+    // win_title : 1er · top3 : ≤3 · top_half : ≤4 · avoid_relegation : ≤7 (pas dernier)
+    const OBJECTIVE_RANK_OK: Record<string, (rank: number, total: number) => boolean> = {
+      win_title:        (rank) => rank === 1,
+      top3:             (rank) => rank <= 3,
+      top_half:         (rank) => rank <= 4,
+      avoid_relegation: (rank, total) => rank < total,
+    }
+
+    const { data: objectives } = await supabase
+      .from('season_objectives')
+      .select('*')
+      .eq('league_season_id', league_season_id)
+      .eq('status', 'pending')
+
+    for (const obj of objectives ?? []) {
+      const rank = standings.findIndex((s) => s.club_id === obj.club_id) + 1
+      if (rank === 0) continue
+      const achieved = OBJECTIVE_RANK_OK[obj.objective_type]?.(rank, standings.length) ?? false
+
+      if (achieved) {
+        const { error: objTxErr } = await supabase.from('transactions').insert({
+          club_id:     obj.club_id,
+          type:        'prize',
+          amount:      obj.reward,
+          description: `Objectif de saison atteint — ${league.name}`,
+        })
+        if (objTxErr) log.push(`Objectif: erreur transaction club ${obj.club_id} — ${objTxErr.message}`)
+        const { data: clubRow2 } = await supabase.from('clubs').select('balance').eq('id', obj.club_id).single()
+        if (clubRow2) {
+          await supabase.from('clubs').update({ balance: (clubRow2.balance ?? 0) + obj.reward }).eq('id', obj.club_id)
+        }
+        await supabase.from('season_objectives').update({ status: 'achieved' }).eq('id', obj.id)
+      } else {
+        // Objectif raté : le board sanctionne — réputation −5
+        const { data: clubRow3 } = await supabase.from('clubs').select('reputation').eq('id', obj.club_id).single()
+        if (clubRow3) {
+          await supabase.from('clubs')
+            .update({ reputation: Math.max(1, (clubRow3.reputation ?? 50) - 5) })
+            .eq('id', obj.club_id)
+        }
+        await supabase.from('season_objectives').update({ status: 'failed' }).eq('id', obj.id)
+      }
+    }
+    log.push(`Objectifs évalués : ${(objectives ?? []).length}`)
 
     // ── 4. Promotion / relégation ─────────────────────────────────────────────
     const rankClubs = standings.map((s) => ({
@@ -124,16 +171,19 @@ serve(async (req) => {
       const barrageDate = new Date()
       barrageDate.setDate(barrageDate.getDate() + 14)
       barrageDate.setUTCHours(19, 0, 0, 0)
+      // ✅ lineup_deadline est NOT NULL : 1h avant le coup d'envoi
+      const barrageDeadline = new Date(barrageDate.getTime() - 60 * 60_000)
 
-      await supabase.from('matches').insert({
+      const { error: barrageErr } = await supabase.from('matches').insert({
         league_season_id: null,
         home_club_id:     club6.clubId,
         away_club_id:     club7.clubId,
         scheduled_at:     barrageDate.toISOString(),
+        lineup_deadline:  barrageDeadline.toISOString(),
         status:           'scheduled',
         match_day:        15,  // ✅ était round
-        // is_friendly supprimé — colonne inexistante
       })
+      if (barrageErr) log.push(`Barrage: erreur insert — ${barrageErr.message}`)
 
       log.push(`Barrage créé : ${club6.clubName} (6e) vs ${club7.clubName} (7e)`)
     }
@@ -182,6 +232,21 @@ serve(async (req) => {
       }))
       await supabase.from('standings').insert(newStandings)
       log.push(`Standings créés pour ${currentClubIds.length} clubs`)
+
+      // ── Objectifs de la nouvelle saison, selon le rang final ───────────────
+      const newObjectives = currentClubIds.map((clubId) => {
+        const finalRank = rankClubs.findIndex((c) => c.clubId === clubId) + 1
+        const [type, reward] =
+          finalRank <= 2 ? ['win_title', 300000]
+          : finalRank <= 4 ? ['top3', 200000]
+          : finalRank <= 6 ? ['top_half', 120000]
+          : ['avoid_relegation', 80000]
+        return { league_season_id: newSeason.id, club_id: clubId, objective_type: type, reward }
+      })
+      const { error: newObjErr } = await supabase.from('season_objectives').insert(newObjectives)
+      log.push(newObjErr
+        ? `Objectifs nouvelle saison: erreur — ${newObjErr.message}`
+        : `Objectifs assignés pour ${newObjectives.length} clubs`)
     }
 
     // ── 8. Générer le calendrier — seulement si les 8 clubs sont déjà en place ──

@@ -61,6 +61,24 @@ serve(async (req) => {
   const isFirstOfMonth = today.getUTCDate() === 1
   const log: string[] = []
 
+  // ── Rapport quotidien par club humain (affiché sur le Dashboard) ────────────
+  interface DailyReport {
+    training: { totalGain: number; top: { name: string; gain: number }[] }
+    recovered: string[]
+    academy: string[]
+    market: string[]
+    financesNet?: number
+  }
+  const reports: Record<string, DailyReport> = {}
+  const report = (clubId: string): DailyReport => {
+    if (!reports[clubId]) {
+      reports[clubId] = { training: { totalGain: 0, top: [] }, recovered: [], academy: [], market: [] }
+    }
+    return reports[clubId]
+  }
+  const pName = (p: { first_name?: string | null; last_name?: string | null }) =>
+    `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() || 'Joueur'
+
   try {
 
     // ── Pré-charger les club IDs des bots (is_bot est sur clubs, pas players) ──
@@ -104,7 +122,7 @@ serve(async (req) => {
       // ✅ filtrage par injury_days_left > 0, pas is_injured
       const { data: injured } = await supabase
         .from('players')
-        .select('id, injury_days_left, club_id')
+        .select('id, injury_days_left, club_id, first_name, last_name')
         .gt('injury_days_left', 0)
 
       for (const p of injured ?? []) {
@@ -116,6 +134,7 @@ serve(async (req) => {
         const newDays = Math.max(0, (p.injury_days_left ?? 0) - recovery)
         // ✅ pas de is_injured : dérivé de injury_days_left côté lecture
         await supabase.from('players').update({ injury_days_left: newDays }).eq('id', p.id)
+        if (newDays === 0) report(p.club_id).recovered.push(pName(p))
       }
       log.push(`Blessures: ${(injured ?? []).length} joueurs traités`)
     }
@@ -175,7 +194,10 @@ serve(async (req) => {
             for (const stat of ALL_STATS) {
               const slots = (focusStats[stat] ?? 0) as number
               if (slots === 0) continue
-              updates[stat] = clamp((player[stat] ?? 0) + slots * 0.2 * bonus)
+              // Plafond à 80 : sans cap, les bots (pas de capFactor) finissaient
+              // par dépasser mécaniquement tous les clubs humains
+              const current = player[stat] ?? 0
+              updates[stat] = clamp(current + slots * 0.2 * bonus, 0, Math.max(current, 80))
             }
             if (Object.keys(updates).length) {
               await supabase.from('players').update(updates).eq('id', player.id)
@@ -189,6 +211,7 @@ serve(async (req) => {
           // ✅ initial_stats est un jsonb, pas des colonnes individuelles
           const initialStats = player.initial_stats ?? {}
 
+          let playerGain = 0
           for (const stat of ALL_STATS) {
             const slots = (focusStats[stat] ?? 0) as number
             if (slots === 0) continue
@@ -196,9 +219,15 @@ serve(async (req) => {
             const initialStat = (initialStats[stat] ?? current) as number
             const gain        = slots * 0.3 * ageFactor(age) * capFactor(current, initialStat) * bonus
             statUpdates[stat] = clamp(current + gain)
+            playerGain += statUpdates[stat] - current
           }
           if (Object.keys(statUpdates).length) {
             await supabase.from('players').update(statUpdates).eq('id', player.id)
+          }
+          if (playerGain > 0.05) {
+            const r = report(plan.club_id)
+            r.training.totalGain += playerGain
+            r.training.top.push({ name: pName(player), gain: playerGain })
           }
         }
       }
@@ -286,6 +315,7 @@ serve(async (req) => {
         if (txErr) log.push(`Finances: erreur insert transactions club ${club.id} — ${txErr.message}`)
 
         await supabase.from('clubs').update({ balance: newBalance }).eq('id', club.id)
+        if (!club.is_bot) report(club.id).financesNet = netFlow
       }
       log.push('Finances: transactions mensuelles générées')
     }
@@ -356,9 +386,19 @@ serve(async (req) => {
 
         const variation  = formScore * 50 + ((club.reputation ?? 50) - 50) * 5
         const newSupport = Math.max(500, (club.supporters_count ?? 1000) + variation)
-        await supabase.from('clubs').update({ supporters_count: Math.round(newSupport) }).eq('id', club.id)
+
+        // Réputation vivante : dérive lentement vers une cible dépendant de la
+        // forme récente (bien jouer → réputation → sponsors/affluence).
+        // 5%/jour de l'écart → convergence en ~2 mois, pas d'emballement.
+        const currentRep = club.reputation ?? 50
+        const targetRep  = clamp(50 + formScore * 4, 20, 95)
+        const newRep     = clamp(Math.round(currentRep + (targetRep - currentRep) * 0.05), 1, 100)
+
+        await supabase.from('clubs')
+          .update({ supporters_count: Math.round(newSupport), reputation: newRep })
+          .eq('id', club.id)
       }
-      log.push('Supporters: mis à jour')
+      log.push('Supporters & réputation: mis à jour')
     }
 
     // ── 7. Académie (le dimanche) ─────────────────────────────────────────────
@@ -410,6 +450,7 @@ serve(async (req) => {
         const { error: academyErr } = await supabase.from('players').insert(newPlayers)
         if (academyErr) { log.push(`Académie: erreur insert club ${club.id} — ${academyErr.message}`); continue }
         totalAcademy += count
+        newPlayers.forEach((np) => report(club.id).academy.push(pName(np)))
       }
       log.push(`Académie: ${totalAcademy} talents générés`)
 
@@ -440,6 +481,42 @@ serve(async (req) => {
       log.push(freeAgentErr
         ? `Agents libres: erreur insert — ${freeAgentErr.message}`
         : `Agents libres: ${freeAgentCount} nouveaux joueurs sur le marché`)
+
+      // Signaler les arrivées notables (note ≥ 55) dans le rapport de chaque club humain
+      if (!freeAgentErr) {
+        const notable = freeAgents
+          .map((fa) => {
+            const overall = Math.round(ALL_STATS.reduce((s, k) => s + ((fa as Record<string, unknown>)[k] as number), 0) / ALL_STATS.length)
+            return { name: pName(fa), overall }
+          })
+          .filter((fa) => fa.overall >= 55)
+        if (notable.length) {
+          const { data: humanClubs2 } = await supabase.from('clubs').select('id').eq('is_bot', false)
+          for (const hc of humanClubs2 ?? []) {
+            notable.forEach((fa) => report(hc.id).market.push(`${fa.name} (${fa.overall})`))
+          }
+        }
+      }
+    }
+
+    // ── 8. Écriture des rapports quotidiens (clubs humains) ───────────────────
+    {
+      const { data: humanClubs } = await supabase.from('clubs').select('id').eq('is_bot', false)
+      const rows = (humanClubs ?? []).map((c) => {
+        const r = report(c.id)
+        r.training.totalGain = Math.round(r.training.totalGain * 10) / 10
+        r.training.top = r.training.top
+          .sort((a, b) => b.gain - a.gain)
+          .slice(0, 3)
+          .map((t) => ({ name: t.name, gain: Math.round(t.gain * 10) / 10 }))
+        return { club_id: c.id, report_date: todayStr, payload: r }
+      })
+      if (rows.length) {
+        const { error: repErr } = await supabase
+          .from('daily_reports')
+          .upsert(rows, { onConflict: 'club_id,report_date' })
+        log.push(repErr ? `Rapports: erreur — ${repErr.message}` : `Rapports: ${rows.length} clubs`)
+      }
     }
 
     return new Response(

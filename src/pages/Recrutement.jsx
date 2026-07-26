@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import Layout from '../components/Layout'
+import { CONTRACT_DURATIONS, expectedSalary, acceptanceChance, acceptanceLabel, acceptanceColor } from '../lib/contracts'
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -31,8 +32,6 @@ const AGE_RANGES = [
   { key: '26-30', label: '26–30 ans' },
   { key: '31+',   label: '31+ ans'   },
 ]
-
-const CONTRACT_DURATIONS = [3, 6, 12, 18, 24]
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -70,19 +69,6 @@ const matchesAge = (age, range) => {
 const fmt = (n) =>
   (n ?? 0).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 })
 
-// Salaire "attendu" par un joueur selon son niveau (même formule que le
-// salaire suggéré déjà affiché). En dessous de 70% de ce montant, le joueur
-// refuse toujours ; entre 70% et 100%, la chance d'acceptation monte
-// linéairement ; au-dessus, il accepte toujours.
-const expectedSalary = (overall) => Math.round((overall * 80 + 1000) / 500) * 500
-
-const acceptanceChance = (salary, expected) => {
-  const ratio = expected > 0 ? salary / expected : 1
-  if (ratio >= 1) return 1
-  if (ratio <= 0.7) return 0
-  return (ratio - 0.7) / 0.3
-}
-
 const computeAge = (dateOfBirth) => {
   if (!dateOfBirth) return null
   const today = new Date()
@@ -107,11 +93,8 @@ function ContractModal({ player, listing, clubBalance, onConfirm, onClose, savin
   const canAfford = clubBalance >= totalUpfront
   const age = computeAge(player.date_of_birth)
 
-  const acceptanceLabel = chance >= 0.9 ? 'Offre généreuse'
-    : chance >= 0.5 ? 'Bonne chance d\'acceptation'
-    : chance > 0 ? 'Risque de refus élevé'
-    : 'Refus certain'
-  const acceptanceColor = chance >= 0.9 ? '#1B7A4A' : chance >= 0.5 ? '#F5820D' : '#e74c3c'
+  const chanceLabel = acceptanceLabel(chance)
+  const chanceColor = acceptanceColor(chance)
 
   const handleConfirmClick = () => {
     setRejected(false)
@@ -175,10 +158,10 @@ function ContractModal({ player, listing, clubBalance, onConfirm, onClose, savin
             </div>
             <div className="recr-acceptance-row">
               <div className="recr-acceptance-bar-track">
-                <div className="recr-acceptance-bar-fill" style={{ width: `${chance * 100}%`, background: acceptanceColor }} />
+                <div className="recr-acceptance-bar-fill" style={{ width: `${chance * 100}%`, background: chanceColor }} />
               </div>
-              <span className="recr-acceptance-label" style={{ color: acceptanceColor }}>
-                {acceptanceLabel} ({Math.round(chance * 100)}%)
+              <span className="recr-acceptance-label" style={{ color: chanceColor }}>
+                {chanceLabel} ({Math.round(chance * 100)}%)
               </span>
             </div>
             {!canAfford && (
